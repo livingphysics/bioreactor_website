@@ -1,12 +1,89 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Bioreactor Web Server</title>
-    <link rel="stylesheet" href="/static/style.css">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bioreactor Control System</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+    <style>
+        .nav-links {
+            margin-bottom: 20px;
+        }
+        .nav-links a {
+            margin-right: 15px;
+            color: #007bff;
+            text-decoration: none;
+        }
+        .nav-links a:hover {
+            text-decoration: underline;
+        }
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-top: 30px;
+        }
+        .feature-card {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid #dee2e6;
+        }
+        .feature-card h3 {
+            color: #495057;
+            margin-top: 0;
+        }
+    </style>
 </head>
 <body>
-    <h1>Welcome to the Bioreactor Web Server</h1>
-    <p>Upload your experiment script to run on the bioreactor.</p>
-    <a href="/upload">Upload Script</a>
+    <div class="container">
+        <h1>Bioreactor Control System</h1>
+        
+        <div class="nav-links">
+            <a href="/">Home</a>
+            <a href="/upload">Upload Experiment</a>
+            <a href="/my-experiments">My Experiments</a>
+            <a href="/queue">Queue Status</a>
+        </div>
+
+        <p>Welcome to the Bioreactor Control System. Upload your Python scripts to run experiments on our bioreactor hardware.</p>
+
+        <div class="feature-grid">
+            <div class="feature-card">
+                <h3>📤 Upload Experiments</h3>
+                <p>Upload your Python scripts to be queued and executed on the bioreactor hardware. Only one experiment runs at a time.</p>
+                <a href="/upload" class="btn">Upload Script</a>
+            </div>
+            
+            <div class="feature-card">
+                <h3>📋 Queue Management</h3>
+                <p>View the current queue status, estimated wait times, and manage experiments with admin controls.</p>
+                <a href="/queue" class="btn">View Queue</a>
+            </div>
+            
+            <div class="feature-card">
+                <h3>🔬 My Experiments</h3>
+                <p>Track all your experiments, view their status, and download results when completed.</p>
+                <a href="/my-experiments" class="btn">View My Experiments</a>
+            </div>
+        </div>
+
+        <h2>How It Works</h2>
+        <ol>
+            <li><strong>Upload:</strong> Submit your Python script through the upload form</li>
+            <li><strong>Queue:</strong> Your experiment is added to the queue (max 5 per user)</li>
+            <li><strong>Execute:</strong> When it's your turn, the experiment runs in an isolated container</li>
+            <li><strong>Monitor:</strong> Track progress and download results when complete</li>
+        </ol>
+
+        <h2>Features</h2>
+        <ul>
+            <li><strong>Queue System:</strong> FIFO queue with one experiment running at a time</li>
+            <li><strong>Admin Controls:</strong> Cancel, pause, resume, and reorder experiments</li>
+            <li><strong>Real-time Status:</strong> Live updates on experiment progress</li>
+            <li><strong>Result Download:</strong> Download experiment results as ZIP files</li>
+            <li><strong>Session Management:</strong> Track your experiments across browser sessions</li>
+        </ul>
+    </div>
 </body>
 </html> 

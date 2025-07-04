@@ -1,4 +1,8 @@
 from src.utils import balanced_flow, pid_controller
+from src.bioreactor import Bioreactor
+import logging
+import time
+import matplotlib.pyplot as plt
 
 # Orchestration functions
 
@@ -51,17 +55,13 @@ def chemostat_mode(
     bioreactor.run(jobs)
 
 if __name__ == "__main__":
-    from bioreactor import Bioreactor
-    import logging
-    import time
-    import matplotlib.pyplot as plt
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     DURATION = 8 * 3600  # 8 hours
     try:
         with Bioreactor() as bioreactor:
             chemostat_mode(
                 bioreactor=bioreactor,
-                pump_name='A_in',
+                pump_name='tube_1_in',
                 flow_rate_ml_s=0.01,
                 temp_setpoint=37.0,
                 kp=10.0,

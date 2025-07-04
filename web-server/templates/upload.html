@@ -1,28 +1,105 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Upload Script - Bioreactor Web Server</title>
-    <link rel="stylesheet" href="/static/style.css">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upload Experiment - Bioreactor Control System</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+    <style>
+        .nav-links {
+            margin-bottom: 20px;
+        }
+        .nav-links a {
+            margin-right: 15px;
+            color: #007bff;
+            text-decoration: none;
+        }
+        .nav-links a:hover {
+            text-decoration: underline;
+        }
+        .success-info {
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+        .queue-info {
+            background: #e2e3e5;
+            border: 1px solid #d6d8db;
+            color: #383d41;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+        .upload-form {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid #dee2e6;
+            max-width: 500px;
+        }
+    </style>
 </head>
 <body>
-    <h1>Upload Experiment Script</h1>
-    {% if error %}
-        <div class="error">{{ error }}</div>
-    {% endif %}
-    {% if success %}
-        <div class="success">{{ success }}</div>
-    {% endif %}
-    {% if experiment_id %}
-        <div class="success">
-            Experiment submitted!<br>
-            Experiment ID: <b>{{ experiment_id }}</b><br>
-            <a href="/experiment/{{ experiment_id }}">View Experiment Status</a>
+    <div class="container">
+        <h1>Upload Experiment</h1>
+        
+        <div class="nav-links">
+            <a href="/">Home</a>
+            <a href="/upload">Upload Experiment</a>
+            <a href="/my-experiments">My Experiments</a>
+            <a href="/queue">Queue Status</a>
         </div>
-    {% endif %}
-    <form action="/upload" method="post" enctype="multipart/form-data">
-        <input type="file" name="file" accept=".py" required>
-        <button type="submit">Upload</button>
-    </form>
-    <p><a href="/">Back to Home</a></p>
+
+        {% if success %}
+        <div class="success-info">
+            <h3>✅ Success!</h3>
+            <p>{{ success }}</p>
+            {% if experiment_id %}
+            <p><strong>Experiment ID:</strong> {{ experiment_id }}</p>
+            {% endif %}
+            {% if queue_position %}
+            <div class="queue-info">
+                <p><strong>Queue Position:</strong> {{ queue_position }}</p>
+                <p><strong>Estimated Wait Time:</strong> {{ queue_position * 10 }} minutes</p>
+                <p><a href="/experiment/{{ experiment_id }}">View Experiment Status</a> | <a href="/queue">View Queue</a></p>
+            </div>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        {% if error %}
+        <div class="error">
+            <h3>❌ Error</h3>
+            <p>{{ error }}</p>
+        </div>
+        {% endif %}
+
+        <div class="upload-form">
+            <h3>Upload Python Script</h3>
+            <p>Upload your Python script to be queued for execution on the bioreactor hardware.</p>
+            
+            <form action="/upload" method="post" enctype="multipart/form-data">
+                <div style="margin-bottom: 15px;">
+                    <label for="file">Select Python file (.py):</label><br>
+                    <input type="file" id="file" name="file" accept=".py" required>
+                </div>
+                <button type="submit" class="btn">Upload and Queue Experiment</button>
+            </form>
+        </div>
+
+        <div style="margin-top: 30px;">
+            <h3>Important Notes:</h3>
+            <ul>
+                <li>Only Python (.py) files are accepted</li>
+                <li>Maximum 5 experiments per user session</li>
+                <li>Experiments run one at a time in FIFO order</li>
+                <li>You can monitor your experiment status and queue position</li>
+                <li>Use admin controls to manage your experiments if needed</li>
+            </ul>
+        </div>
+    </div>
 </body>
 </html> 

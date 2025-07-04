@@ -27,6 +27,7 @@ services:
       - bioreactor-node
     volumes:
       - ./bioreactor-hub/ssh_keys:/app/ssh_keys:ro
+      - ./bioreactor-hub/data:/app/data
 
   # Bioreactor Node - Hardware interface and container management
   bioreactor-node:

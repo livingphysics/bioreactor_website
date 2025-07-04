@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Queue Status - Bioreactor Control System</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+    <style>
+        .queue-stats {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .queue-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        .queue-table th, .queue-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        .queue-table th {
+            background-color: #f2f2f2;
+            font-weight: bold;
+        }
+        .status-queued { color: #007bff; }
+        .status-running { color: #28a745; }
+        .status-completed { color: #6c757d; }
+        .status-failed { color: #dc3545; }
+        .status-cancelled { color: #ffc107; }
+        .status-paused { color: #fd7e14; }
+        .admin-actions {
+            display: flex;
+            gap: 5px;
+            flex-wrap: wrap;
+        }
+        .btn-small {
+            padding: 4px 8px;
+            font-size: 12px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+        }
+        .btn-cancel { background-color: #dc3545; color: white; }
+        .btn-pause { background-color: #ffc107; color: black; }
+        .btn-resume { background-color: #28a745; color: white; }
+        .btn-reorder { background-color: #17a2b8; color: white; }
+        .reorder-input {
+            width: 60px;
+            padding: 2px 4px;
+            border: 1px solid #ddd;
+            border-radius: 3px;
+        }
+        .nav-links {
+            margin-bottom: 20px;
+        }
+        .nav-links a {
+            margin-right: 15px;
+            color: #007bff;
+            text-decoration: none;
+        }
+        .nav-links a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Queue Status</h1>
+        
+        <div class="nav-links">
+            <a href="/">Home</a>
+            <a href="/upload">Upload Experiment</a>
+            <a href="/my-experiments">My Experiments</a>
+            <a href="/queue">Queue Status</a>
+        </div>
+
+        {% if error %}
+        <div class="error">
+            <h3>Error</h3>
+            <p>{{ error }}</p>
+        </div>
+        {% else %}
+        
+        <div class="queue-stats">
+            <h3>Queue Statistics</h3>
+            <p><strong>Total Queued:</strong> {{ queue.total_queued }}</p>
+            <p><strong>Total Running:</strong> {{ queue.total_running }}</p>
+            <p><strong>Total Paused:</strong> {{ queue.total_paused }}</p>
+            <p><strong>Estimated Wait Time:</strong> {{ queue.estimated_wait_minutes }} minutes</p>
+        </div>
+
+        <h3>Queue Details</h3>
+        {% if queue.queue %}
+        <table class="queue-table">
+            <thead>
+                <tr>
+                    <th>Position</th>
+                    <th>Experiment ID</th>
+                    <th>User Session</th>
+                    <th>Status</th>
+                    <th>Created</th>
+                    <th>Admin Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for i, exp in enumerate(queue.queue) %}
+                <tr>
+                    <td>{{ i + 1 }}</td>
+                    <td>
+                        <a href="/experiment/{{ exp.experiment_id }}">{{ exp.experiment_id[:8] }}...</a>
+                    </td>
+                    <td>{{ exp.user_session_id[:8] }}...</td>
+                    <td class="status-{{ exp.status }}">{{ exp.status.title() }}</td>
+                    <td>{{ exp.created_at[:19].replace('T', ' ') }}</td>
+                    <td>
+                        <div class="admin-actions">
+                            {% if exp.status == 'queued' %}
+                            <button class="btn-small btn-cancel" onclick="cancelExperiment('{{ exp.experiment_id }}')">Cancel</button>
+                            <button class="btn-small btn-pause" onclick="pauseExperiment('{{ exp.experiment_id }}')">Pause</button>
+                            <button class="btn-small btn-reorder" onclick="reorderExperiment('{{ exp.experiment_id }}', {{ i + 1 }})">Reorder</button>
+                            {% elif exp.status == 'paused' %}
+                            <button class="btn-small btn-resume" onclick="resumeExperiment('{{ exp.experiment_id }}')">Resume</button>
+                            {% endif %}
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p>No experiments in queue.</p>
+        {% endif %}
+        
+        {% endif %}
+    </div>
+
+    <script>
+        async function cancelExperiment(experimentId) {
+            if (confirm('Are you sure you want to cancel this experiment?')) {
+                const response = await fetch(`/api/experiments/${experimentId}/cancel`, {
+                    method: 'POST'
+                });
+                const result = await response.json();
+                alert(result.message);
+                if (result.success) {
+                    location.reload();
+                }
+            }
+        }
+
+        async function pauseExperiment(experimentId) {
+            const response = await fetch(`/api/experiments/${experimentId}/pause`, {
+                method: 'POST'
+            });
+            const result = await response.json();
+            alert(result.message);
+            if (result.success) {
+                location.reload();
+            }
+        }
+
+        async function resumeExperiment(experimentId) {
+            const response = await fetch(`/api/experiments/${experimentId}/resume`, {
+                method: 'POST'
+            });
+            const result = await response.json();
+            alert(result.message);
+            if (result.success) {
+                location.reload();
+            }
+        }
+
+        async function reorderExperiment(experimentId, currentPosition) {
+            const newPosition = prompt(`Current position: ${currentPosition}\nEnter new position:`, currentPosition);
+            if (newPosition && newPosition !== currentPosition) {
+                const response = await fetch(`/api/experiments/${experimentId}/reorder?new_position=${newPosition}`, {
+                    method: 'POST'
+                });
+                const result = await response.json();
+                alert(result.message);
+                if (result.success) {
+                    location.reload();
+                }
+            }
+        }
+
+        // Auto-refresh every 30 seconds
+        setInterval(() => {
+            location.reload();
+        }, 30000);
+    </script>
+</body>
+</html> 

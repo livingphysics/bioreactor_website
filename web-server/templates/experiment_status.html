@@ -1,29 +1,170 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Experiment Status - Bioreactor Web Server</title>
-    <link rel="stylesheet" href="/static/style.css">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Experiment Status - Bioreactor Control System</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+    <style>
+        .nav-links {
+            margin-bottom: 20px;
+        }
+        .nav-links a {
+            margin-right: 15px;
+            color: #007bff;
+            text-decoration: none;
+        }
+        .nav-links a:hover {
+            text-decoration: underline;
+        }
+        .status-card {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid #dee2e6;
+            margin: 20px 0;
+        }
+        .status-queued { color: #007bff; }
+        .status-running { color: #28a745; }
+        .status-completed { color: #6c757d; }
+        .status-failed { color: #dc3545; }
+        .status-cancelled { color: #ffc107; }
+        .status-paused { color: #fd7e14; }
+        .queue-info {
+            background: #e2e3e5;
+            border: 1px solid #d6d8db;
+            color: #383d41;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 15px 0;
+        }
+        .action-buttons {
+            margin-top: 20px;
+        }
+        .action-buttons a, .action-buttons button {
+            margin-right: 10px;
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+        }
+        .btn-primary { background-color: #007bff; color: white; }
+        .btn-success { background-color: #28a745; color: white; }
+        .btn-warning { background-color: #ffc107; color: black; }
+        .btn-danger { background-color: #dc3545; color: white; }
+    </style>
 </head>
 <body>
-    <h1>Experiment Status</h1>
-    {% if error %}
-        <div class="error">{{ error }}</div>
-    {% endif %}
-    {% if experiment %}
-        <div>
-            <b>Experiment ID:</b> {{ experiment_id }}<br>
-            <b>Status:</b> {{ experiment.status }}<br>
-            <b>Start Time:</b> {{ experiment.start_time or 'N/A' }}<br>
-            <b>End Time:</b> {{ experiment.end_time or 'N/A' }}<br>
-            <b>Exit Code:</b> {{ experiment.exit_code or 'N/A' }}<br>
-            <b>Duration:</b> {{ experiment.duration or 'N/A' }} seconds<br>
+    <div class="container">
+        <h1>Experiment Status</h1>
+        
+        <div class="nav-links">
+            <a href="/">Home</a>
+            <a href="/upload">Upload Experiment</a>
+            <a href="/my-experiments">My Experiments</a>
+            <a href="/queue">Queue Status</a>
         </div>
-        {% if experiment.status == 'completed' %}
-            <div style="margin-top:1em;">
-                <a href="/experiment/{{ experiment_id }}/download">Download Results (ZIP)</a>
+
+        {% if error %}
+        <div class="error">
+            <h3>❌ Error</h3>
+            <p>{{ error }}</p>
+        </div>
+        {% else %}
+        
+        <div class="status-card">
+            <h3>Experiment: {{ experiment_id[:8] }}...</h3>
+            
+            <p><strong>Status:</strong> <span class="status-{{ experiment.status }}">{{ experiment.status.title() }}</span></p>
+            
+            {% if experiment.queue_position %}
+            <div class="queue-info">
+                <p><strong>Queue Position:</strong> {{ experiment.queue_position }}</p>
+                <p><strong>Estimated Wait Time:</strong> {{ experiment.queue_position * 10 }} minutes</p>
+                <p><a href="/queue">View Full Queue</a></p>
             </div>
+            {% endif %}
+            
+            <p><strong>Created:</strong> {{ experiment.created_at[:19].replace('T', ' ') }}</p>
+            
+            {% if experiment.started_at %}
+            <p><strong>Started:</strong> {{ experiment.started_at[:19].replace('T', ' ') }}</p>
+            {% endif %}
+            
+            {% if experiment.completed_at %}
+            <p><strong>Completed:</strong> {{ experiment.completed_at[:19].replace('T', ' ') }}</p>
+            {% endif %}
+            
+            {% if experiment.exit_code is not none %}
+            <p><strong>Exit Code:</strong> {{ experiment.exit_code }}</p>
+            {% endif %}
+            
+            {% if experiment.error_message %}
+            <p><strong>Error:</strong> {{ experiment.error_message }}</p>
+            {% endif %}
+        </div>
+
+        <div class="action-buttons">
+            {% if experiment.status == 'queued' %}
+            <button class="btn-warning" onclick="pauseExperiment('{{ experiment_id }}')">Pause</button>
+            <button class="btn-danger" onclick="cancelExperiment('{{ experiment_id }}')">Cancel</button>
+            {% elif experiment.status == 'paused' %}
+            <button class="btn-success" onclick="resumeExperiment('{{ experiment_id }}')">Resume</button>
+            {% endif %}
+            
+            {% if experiment.status == 'completed' %}
+            <a href="/experiment/{{ experiment_id }}/download" class="btn-primary">Download Results</a>
+            {% endif %}
+            
+            <a href="/my-experiments" class="btn-primary">View My Experiments</a>
+            <a href="/queue" class="btn-primary">View Queue</a>
+        </div>
+        
         {% endif %}
-    {% endif %}
-    <p><a href="/">Back to Home</a></p>
+    </div>
+
+    <script>
+        async function cancelExperiment(experimentId) {
+            if (confirm('Are you sure you want to cancel this experiment?')) {
+                const response = await fetch(`/api/experiments/${experimentId}/cancel`, {
+                    method: 'POST'
+                });
+                const result = await response.json();
+                alert(result.message);
+                if (result.success) {
+                    location.reload();
+                }
+            }
+        }
+
+        async function pauseExperiment(experimentId) {
+            const response = await fetch(`/api/experiments/${experimentId}/pause`, {
+                method: 'POST'
+            });
+            const result = await response.json();
+            alert(result.message);
+            if (result.success) {
+                location.reload();
+            }
+        }
+
+        async function resumeExperiment(experimentId) {
+            const response = await fetch(`/api/experiments/${experimentId}/resume`, {
+                method: 'POST'
+            });
+            const result = await response.json();
+            alert(result.message);
+            if (result.success) {
+                location.reload();
+            }
+        }
+
+        // Auto-refresh every 30 seconds
+        setInterval(() => {
+            location.reload();
+        }, 30000);
+    </script>
 </body>
 </html> 

@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My Experiments - Bioreactor Control System</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+    <style>
+        .experiments-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        .experiments-table th, .experiments-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        .experiments-table th {
+            background-color: #f2f2f2;
+            font-weight: bold;
+        }
+        .status-queued { color: #007bff; }
+        .status-running { color: #28a745; }
+        .status-completed { color: #6c757d; }
+        .status-failed { color: #dc3545; }
+        .status-cancelled { color: #ffc107; }
+        .status-paused { color: #fd7e14; }
+        .nav-links {
+            margin-bottom: 20px;
+        }
+        .nav-links a {
+            margin-right: 15px;
+            color: #007bff;
+            text-decoration: none;
+        }
+        .nav-links a:hover {
+            text-decoration: underline;
+        }
+        .action-links a {
+            margin-right: 10px;
+            color: #007bff;
+            text-decoration: none;
+        }
+        .action-links a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>My Experiments</h1>
+        
+        <div class="nav-links">
+            <a href="/">Home</a>
+            <a href="/upload">Upload Experiment</a>
+            <a href="/my-experiments">My Experiments</a>
+            <a href="/queue">Queue Status</a>
+        </div>
+
+        {% if error %}
+        <div class="error">
+            <h3>Error</h3>
+            <p>{{ error }}</p>
+        </div>
+        {% else %}
+        
+        {% if experiments %}
+        <table class="experiments-table">
+            <thead>
+                <tr>
+                    <th>Experiment ID</th>
+                    <th>Status</th>
+                    <th>Queue Position</th>
+                    <th>Created</th>
+                    <th>Started</th>
+                    <th>Completed</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for exp in experiments %}
+                <tr>
+                    <td>
+                        <a href="/experiment/{{ exp.experiment_id }}">{{ exp.experiment_id[:8] }}...</a>
+                    </td>
+                    <td class="status-{{ exp.status }}">{{ exp.status.title() }}</td>
+                    <td>
+                        {% if exp.queue_position %}
+                            {{ exp.queue_position }}
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                    <td>{{ exp.created_at[:19].replace('T', ' ') }}</td>
+                    <td>
+                        {% if exp.started_at %}
+                            {{ exp.started_at[:19].replace('T', ' ') }}
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if exp.completed_at %}
+                            {{ exp.completed_at[:19].replace('T', ' ') }}
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                    <td class="action-links">
+                        <a href="/experiment/{{ exp.experiment_id }}">View Details</a>
+                        {% if exp.status == 'completed' %}
+                        <a href="/experiment/{{ exp.experiment_id }}/download">Download Results</a>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p>No experiments found for your session.</p>
+        <p><a href="/upload">Upload your first experiment</a></p>
+        {% endif %}
+        
+        {% endif %}
+    </div>
+
+    <script>
+        // Auto-refresh every 30 seconds
+        setInterval(() => {
+            location.reload();
+        }, 30000);
+    </script>
+</body>
+</html> 
