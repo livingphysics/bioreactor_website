@@ -12,6 +12,8 @@ services:
       - bioreactor-hub
     volumes:
       - ./web-server/uploads_tmp:/app/uploads_tmp
+    networks:
+      - bioreactor-network
 
   # Bioreactor Hub - Experiment forwarding service
   bioreactor-hub:
@@ -19,28 +21,30 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - BIOREACTOR_NODE_HOST=bioreactor-node
-      - BIOREACTOR_NODE_PORT=22
-      - BIOREACTOR_NODE_USERNAME=pi
-      - SSH_KEY_PATH=/app/ssh_keys/id_rsa
+      - BIOREACTOR_NODE_API_URL=http://bioreactor-node:9000
     depends_on:
       - bioreactor-node
     volumes:
-      - ./bioreactor-hub/ssh_keys:/app/ssh_keys:ro
       - ./bioreactor-hub/data:/app/data
+    networks:
+      - bioreactor-network
 
-  # Bioreactor Node - Hardware interface and container management
+  # Bioreactor Node v3 - Modular hardware interface with v2 compatibility
   bioreactor-node:
-    build: ./bioreactor-node
+    build: ./bioreactor-node-v3
+    container_name: bioreactor-node-v3
     ports:
       - "9000:9000"
     environment:
-      - HARDWARE_MODE=simulation
+      - HARDWARE_MODE=simulation  # Set to "real" for physical hardware
       - LOG_LEVEL=INFO
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./bioreactor-node/data:/app/data
-    privileged: true  # Required for Docker-in-Docker
+      - ./bioreactor-node-v3/data:/app/data
+      - /dev/gpiochip4:/dev/gpiochip4  # Pi 5 GPIO (only for real mode)
+    privileged: true  # Required for Docker-in-Docker and GPIO access
+    networks:
+      - bioreactor-network
 
 volumes:
   experiment-data:

@@ -14,6 +14,7 @@ from pydantic import BaseModel
 import uvicorn
 
 from .ssh_client import BioreactorNodeClient
+from .http_client import BioreactorNodeHTTPClient
 from .queue_manager import QueueManager, ExperimentStatus
 import threading
 import time
@@ -26,7 +27,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Global instances
-node_client: Optional[BioreactorNodeClient] = None
+node_client: Optional[BioreactorNodeHTTPClient] = None
 queue_manager: Optional[QueueManager] = None
 queue_worker_thread: Optional[threading.Thread] = None
 queue_worker_stop = threading.Event()
@@ -43,25 +44,18 @@ async def lifespan(app: FastAPI):
     
     # Startup
     logger.info("Starting Bioreactor Hub...")
-    
-    # Initialize SSH client for bioreactor-node
-    node_host = os.getenv("BIOREACTOR_NODE_HOST", "localhost")
-    node_port = int(os.getenv("BIOREACTOR_NODE_PORT", "22"))
-    node_username = os.getenv("BIOREACTOR_NODE_USERNAME", "pi")
-    ssh_key_path = os.getenv("SSH_KEY_PATH")
-    
-    node_client = BioreactorNodeClient(
-        host=node_host,
-        port=node_port,
-        username=node_username,
-        key_path=ssh_key_path
-    )
-    
-    # Test SSH connection
-    if node_client.connect():
-        logger.info(f"SSH connection to bioreactor-node established")
+
+    # Initialize HTTP client for bioreactor-node v3
+    node_api_url = os.getenv("BIOREACTOR_NODE_API_URL", "http://bioreactor-node:9000")
+    logger.info(f"Connecting to bioreactor-node at {node_api_url}")
+
+    node_client = BioreactorNodeHTTPClient(node_api_url)
+
+    # Test HTTP connection
+    if node_client.test_connection():
+        logger.info("✓ HTTP connection to bioreactor-node v3 established")
     else:
-        logger.warning("Failed to establish SSH connection to bioreactor-node")
+        logger.warning("✗ Failed to connect to bioreactor-node - experiments will fail")
     
     queue_manager = QueueManager(data_dir="/app/data")
     queue_worker_stop.clear()
@@ -72,11 +66,10 @@ async def lifespan(app: FastAPI):
     
     # Shutdown
     logger.info("Shutting down Bioreactor Hub...")
-    if node_client:
-        node_client.disconnect()
     queue_worker_stop.set()
     if queue_worker_thread:
         queue_worker_thread.join(timeout=5)
+    logger.info("Shutdown complete")
 
 # Background worker to process the experiment queue
 def queue_worker():
