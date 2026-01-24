@@ -20,6 +20,9 @@ COPY bioreactor_v3/ ./bioreactor_v3/
 # Copy application source
 COPY src/ ./src/
 
+# Copy custom hardware config
+COPY config_hardware.py ./
+
 # Create necessary directories
 RUN mkdir -p /app/data/experiments /app/logs
 

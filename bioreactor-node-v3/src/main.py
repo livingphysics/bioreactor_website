@@ -16,7 +16,21 @@ BIOREACTOR_V3_PATH = Path(__file__).parent.parent / 'bioreactor_v3' / 'src'
 sys.path.insert(0, str(BIOREACTOR_V3_PATH))
 
 from bioreactor import Bioreactor
-from config_default import Config
+
+# Try to import custom hardware config, fall back to default
+try:
+    # Try to import from parent directory (custom config)
+    import sys
+    from pathlib import Path
+    parent_dir = Path(__file__).parent.parent
+    sys.path.insert(0, str(parent_dir))
+    from config_hardware import Config
+    logger = logging.getLogger(__name__)
+    logger.info("Using custom hardware configuration from config_hardware.py")
+except ImportError:
+    from config_default import Config
+    logger = logging.getLogger(__name__)
+    logger.info("Using default configuration from bioreactor_v3")
 
 from src.config import NodeConfig
 from src.api.endpoints import create_v3_router

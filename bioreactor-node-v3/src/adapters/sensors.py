@@ -7,7 +7,7 @@ import os
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'bioreactor_v3', 'src'))
 
-from io import read_temperatures, read_photodiodes, read_eyespy_adc, read_co2_sensor
+from io import read_temperatures, read_photodiodes, read_eyespy_adc, read_co2
 
 # Temperature Sensor Adapter
 class TemperatureStateResponse(BaseModel):
@@ -208,10 +208,16 @@ class CO2Adapter(ComponentAdapter):
             }
 
         try:
-            co2_ppm = read_co2_sensor(self.bioreactor)
+            co2_ppm = read_co2(self.bioreactor)
+            if co2_ppm is None:
+                return {
+                    "status": "error",
+                    "co2_ppm": 0.0,
+                    "message": "Failed to read CO2 sensor"
+                }
             return {
                 "status": "success",
-                "co2_ppm": co2_ppm,
+                "co2_ppm": float(co2_ppm),
                 "unit": "ppm"
             }
         except Exception as e:
