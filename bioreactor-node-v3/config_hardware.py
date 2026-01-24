@@ -25,13 +25,31 @@ class HardwareConfig(DefaultConfig):
     """
 
     # ========================================================================
+    # Component Initialization Control
+    # ========================================================================
+    # CRITICAL: This dictionary controls which components are initialized
+    # Set to True to initialize, False to skip
+    INIT_COMPONENTS = {
+        'i2c': False,
+        'temp_sensor': False,  # Disabled - not connected
+        'peltier_driver': False,  # Disabled - not connected
+        'stirrer': False,  # Disabled - not connected
+        'led': False,  # Disabled - not connected
+        'ring_light': False,  # Disabled - not connected
+        'optical_density': False,  # Disabled - not connected
+        'eyespy_adc': False,  # Disabled - not connected
+        'co2_sensor': True,  # ENABLED - Atlas Scientific CO2 sensor
+        'pumps': False,  # Disabled - not connected
+    }
+
+    # ========================================================================
     # CO2 Sensor Configuration
     # ========================================================================
     # Enable CO2 sensor
     CO2_SENSOR_ENABLED = True
 
     # CO2 sensor type: 'sensair_k33', 'sensair', 'atlas', or 'atlas_i2c'
-    CO2_SENSOR_TYPE = 'sensair_k33'
+    CO2_SENSOR_TYPE = 'atlas'  # Atlas Scientific CO2 sensor detected at 0x69
 
     # I2C bus number (typically 1 for /dev/i2c-1)
     CO2_SENSOR_I2C_BUS = 1
@@ -40,38 +58,11 @@ class HardwareConfig(DefaultConfig):
     CO2_SENSOR_I2C_ADDRESS = None  # Will use 0x68 for sensair_k33
 
     # ========================================================================
-    # Disable other components (since only CO2 sensor is connected)
-    # ========================================================================
-    # Temperature sensors
-    TEMP_SENSOR_ENABLED = False
-
-    # Optical density
-    OPTICAL_DENSITY_ENABLED = False
-
-    # Peltier
-    PELTIER_ENABLED = False
-
-    # Stirrer
-    STIRRER_ENABLED = False
-
-    # LED
-    LED_ENABLED = False
-
-    # Ring light
-    RING_LIGHT_ENABLED = False
-
-    # Pumps
-    PUMPS_ENABLED = False
-
-    # Eyespy ADC
-    EYESPY_ADC_ENABLED = False
-
-    # ========================================================================
     # Logging
     # ========================================================================
     LOG_LEVEL = "INFO"  # DEBUG, INFO, WARNING, ERROR
-    LOG_FILE = "/app/logs/bioreactor.log"
-    DATA_OUT_FILE = "/app/data/bioreactor_data.csv"
+    LOG_FILE = "bioreactor.log"  # Local directory for testing
+    DATA_OUT_FILE = "bioreactor_data.csv"  # Local directory for testing
 
 
 # Create config instance to be imported

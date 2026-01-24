@@ -7,20 +7,21 @@ Run this before starting docker-compose to verify hardware initialization.
 import sys
 from pathlib import Path
 
-# Add bioreactor_v3 to path
-BIOREACTOR_V3_PATH = Path(__file__).parent / 'bioreactor_v3' / 'src'
-sys.path.insert(0, str(BIOREACTOR_V3_PATH))
+# Add parent directory to path so we can import bioreactor_v3
+parent_dir = Path(__file__).parent
+sys.path.insert(0, str(parent_dir))
 
 # Import custom config
 try:
     from config_hardware import Config
     print("✓ Using custom hardware configuration")
 except ImportError:
-    from config_default import Config
+    from bioreactor_v3.src.config_default import Config
     print("⚠ Using default configuration (CO2 sensor may be disabled)")
 
-from bioreactor import Bioreactor
-from io import read_co2
+# Import from bioreactor_v3 package
+from bioreactor_v3.src.bioreactor import Bioreactor
+from bioreactor_v3.src.io import read_co2
 
 def main():
     print("\n" + "="*60)
