@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard Settings - Bioreactor Control System</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+    <style>
+        .settings-container {
+            max-width: 800px;
+            margin: 20px auto;
+            padding: 20px;
+        }
+        .settings-section {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .settings-section h3 {
+            margin-top: 0;
+            color: #333;
+        }
+        .setting-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 0;
+            border-bottom: 1px solid #ddd;
+        }
+        .setting-row:last-child {
+            border-bottom: none;
+        }
+        .setting-label {
+            font-weight: 500;
+            color: #555;
+        }
+        .setting-description {
+            font-size: 0.9em;
+            color: #777;
+            margin-top: 4px;
+        }
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 50px;
+            height: 24px;
+        }
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 24px;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        input:checked + .slider {
+            background-color: #28a745;
+        }
+        input:checked + .slider:before {
+            transform: translateX(26px);
+        }
+        .number-input {
+            width: 100px;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .save-btn {
+            background-color: #007bff;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-top: 20px;
+        }
+        .save-btn:hover {
+            background-color: #0056b3;
+        }
+        .message {
+            padding: 12px;
+            border-radius: 4px;
+            margin-top: 10px;
+            display: none;
+        }
+        .message.success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .message.error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .nav-links {
+            margin-bottom: 20px;
+        }
+        .nav-links a {
+            margin-right: 15px;
+            color: #007bff;
+            text-decoration: none;
+        }
+        .nav-links a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="settings-container">
+        <h1>Dashboard Settings</h1>
+
+        <div class="nav-links">
+            <a href="/">Home</a>
+            <a href="/dashboard">Dashboard</a>
+            <a href="/upload">Upload Experiment</a>
+            <a href="/my-experiments">My Experiments</a>
+            <a href="/queue">Queue Status</a>
+        </div>
+
+        <form id="settingsForm">
+            <div class="settings-section">
+                <h3>Hardware Components to Display</h3>
+                <p style="color: #666; font-size: 0.9em;">Select which sensors to monitor on the dashboard when no experiment is running</p>
+
+                <div class="setting-row">
+                    <div>
+                        <div class="setting-label">CO2 Sensor</div>
+                        <div class="setting-description">Display CO2 concentration in ppm</div>
+                    </div>
+                    <label class="switch">
+                        <input type="checkbox" id="co2_sensor" {% if config.display_components.co2_sensor %}checked{% endif %}>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+
+                <div class="setting-row">
+                    <div>
+                        <div class="setting-label">Temperature Sensors</div>
+                        <div class="setting-description">Display vial temperature readings</div>
+                    </div>
+                    <label class="switch">
+                        <input type="checkbox" id="temperature" {% if config.display_components.temperature %}checked{% endif %}>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+
+                <div class="setting-row">
+                    <div>
+                        <div class="setting-label">Photodiodes (OD)</div>
+                        <div class="setting-description">Display optical density readings</div>
+                    </div>
+                    <label class="switch">
+                        <input type="checkbox" id="photodiodes" {% if config.display_components.photodiodes %}checked{% endif %}>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+
+                <div class="setting-row">
+                    <div>
+                        <div class="setting-label">Peltier Current</div>
+                        <div class="setting-description">Display peltier current sensor</div>
+                    </div>
+                    <label class="switch">
+                        <input type="checkbox" id="peltier_current" {% if config.display_components.peltier_current %}checked{% endif %}>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="settings-section">
+                <h3>Update Interval</h3>
+                <div class="setting-row">
+                    <div>
+                        <div class="setting-label">Refresh Interval (seconds)</div>
+                        <div class="setting-description">How often to update sensor readings</div>
+                    </div>
+                    <input type="number" class="number-input" id="update_interval" value="{{ config.update_interval }}" min="0.5" max="60" step="0.5">
+                </div>
+            </div>
+
+            <button type="submit" class="save-btn">Save Settings</button>
+            <div id="message" class="message"></div>
+        </form>
+    </div>
+
+    <script>
+        document.getElementById('settingsForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const config = {
+                display_components: {
+                    co2_sensor: document.getElementById('co2_sensor').checked,
+                    temperature: document.getElementById('temperature').checked,
+                    photodiodes: document.getElementById('photodiodes').checked,
+                    peltier_current: document.getElementById('peltier_current').checked
+                },
+                update_interval: parseFloat(document.getElementById('update_interval').value),
+                csv_file_path: "/app/data/bioreactor_data.csv"
+            };
+
+            try {
+                const response = await fetch('/api/settings/dashboard', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(config)
+                });
+
+                const result = await response.json();
+                const messageEl = document.getElementById('message');
+
+                if (result.status === 'success') {
+                    messageEl.textContent = 'Settings saved successfully!';
+                    messageEl.className = 'message success';
+                } else {
+                    messageEl.textContent = 'Error: ' + result.message;
+                    messageEl.className = 'message error';
+                }
+
+                messageEl.style.display = 'block';
+                setTimeout(() => {
+                    messageEl.style.display = 'none';
+                }, 3000);
+            } catch (error) {
+                const messageEl = document.getElementById('message');
+                messageEl.textContent = 'Error saving settings: ' + error.message;
+                messageEl.className = 'message error';
+                messageEl.style.display = 'block';
+            }
+        });
+    </script>
+</body>
+</html>
