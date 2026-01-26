@@ -26,6 +26,20 @@ def create_v3_router(bioreactor) -> APIRouter:
         """Discover available hardware components and their capabilities"""
         return {name: adapter.get_capabilities() for name, adapter in adapters.items()}
 
+    # Helper factory functions to avoid closure issues
+    def make_control_endpoint(adapter_obj):
+        async def control_endpoint(request):
+            result = await adapter_obj.control(request)
+            if result.get("status") == "error":
+                raise HTTPException(status_code=500, detail=result.get("message"))
+            return result
+        return control_endpoint
+
+    def make_state_endpoint(adapter_obj):
+        async def state_endpoint():
+            return await adapter_obj.read_state()
+        return state_endpoint
+
     # Dynamically create endpoints for each component
     for comp_name, adapter in adapters.items():
 
@@ -34,18 +48,9 @@ def create_v3_router(bioreactor) -> APIRouter:
             control_schema = adapter.get_control_schema()
             state_schema = adapter.get_state_schema()
 
-            async def control_endpoint(
-                request: control_schema,  # type: ignore
-                _adapter=adapter
-            ):
-                result = await _adapter.control(request)
-                if result.get("status") == "error":
-                    raise HTTPException(status_code=500, detail=result.get("message"))
-                return result
-
             router.add_api_route(
                 f"/{comp_name}/control",
-                control_endpoint,
+                make_control_endpoint(adapter),
                 methods=["POST"],
                 response_model=state_schema,  # type: ignore
                 summary=f"Control {comp_name}",
@@ -55,12 +60,9 @@ def create_v3_router(bioreactor) -> APIRouter:
         # State reading endpoint (all components have this)
         state_schema = adapter.get_state_schema()
 
-        async def state_endpoint(_adapter=adapter):
-            return await _adapter.read_state()
-
         router.add_api_route(
             f"/{comp_name}/state",
-            state_endpoint,
+            make_state_endpoint(adapter),
             methods=["GET"],
             response_model=state_schema,  # type: ignore
             summary=f"Read {comp_name} state",

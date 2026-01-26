@@ -11,24 +11,20 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# Add bioreactor_v3 to path
-BIOREACTOR_V3_PATH = Path(__file__).parent.parent / 'bioreactor_v3' / 'src'
-sys.path.insert(0, str(BIOREACTOR_V3_PATH))
+# Add bioreactor_v3 parent directory to path so Python can find it as a package
+BIOREACTOR_V3_PARENT = Path(__file__).parent.parent
+sys.path.insert(0, str(BIOREACTOR_V3_PARENT))
 
-from bioreactor import Bioreactor
+# Import from bioreactor_v3 package
+from bioreactor_v3.src.bioreactor import Bioreactor
 
 # Try to import custom hardware config, fall back to default
 try:
-    # Try to import from parent directory (custom config)
-    import sys
-    from pathlib import Path
-    parent_dir = Path(__file__).parent.parent
-    sys.path.insert(0, str(parent_dir))
     from config_hardware import Config
     logger = logging.getLogger(__name__)
     logger.info("Using custom hardware configuration from config_hardware.py")
 except ImportError:
-    from config_default import Config
+    from bioreactor_v3.src.config_default import Config
     logger = logging.getLogger(__name__)
     logger.info("Using default configuration from bioreactor_v3")
 
@@ -69,7 +65,7 @@ async def lifespan(app: FastAPI):
 
     if hardware_mode == "real":
         try:
-            # Load hardware config from bioreactor_v3
+            # Load hardware config
             config = Config()
 
             # Override paths for containerized environment
@@ -101,6 +97,26 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Simulation mode - hardware initialization skipped")
         bioreactor_instance = None
+
+    # Register API routers after initialization
+    logger.info("Registering API routers...")
+
+    # v3 dynamic endpoints (only if hardware is available)
+    if bioreactor_instance:
+        v3_router = create_v3_router(bioreactor_instance)
+        app.include_router(v3_router)
+        logger.info("✓ v3 dynamic endpoints registered")
+
+        legacy_router = create_legacy_router(bioreactor_instance)
+        app.include_router(legacy_router)
+        logger.info("✓ v2 legacy endpoints registered")
+    else:
+        logger.warning("✗ Hardware endpoints not registered (no hardware available)")
+
+    # Experiment management (always available)
+    experiments_router = create_experiments_router()
+    app.include_router(experiments_router)
+    logger.info("✓ Experiment management endpoints registered")
 
     logger.info("=" * 60)
     logger.info("Bioreactor Node v3 ready")
@@ -169,27 +185,6 @@ async def health_check():
         "initialized_components": initialized_components,
         "component_count": len(initialized_components)
     }
-
-# Include routers
-logger.info("Registering API routers...")
-
-# v3 dynamic endpoints (only if hardware is available)
-if bioreactor_instance:
-    v3_router = create_v3_router(bioreactor_instance)
-    app.include_router(v3_router)
-    logger.info("✓ v3 dynamic endpoints registered")
-
-    legacy_router = create_legacy_router(bioreactor_instance)
-    app.include_router(legacy_router)
-    logger.info("✓ v2 legacy endpoints registered")
-else:
-    logger.warning("✗ Hardware endpoints not registered (no hardware available)")
-
-# Experiment management (always available)
-experiments_router = create_experiments_router()
-app.include_router(experiments_router)
-logger.info("✓ Experiment management endpoints registered")
-
 
 if __name__ == "__main__":
     import uvicorn

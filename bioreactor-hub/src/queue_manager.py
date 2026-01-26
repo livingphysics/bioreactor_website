@@ -103,20 +103,24 @@ class QueueManager:
             self.queue_order = []
     
     def _save_queue(self):
-        """Save queue to JSON file"""
+        """Save queue to JSON file
+
+        NOTE: This method should ONLY be called from within a locked context
+        (i.e., after acquiring self.lock). It does not acquire the lock itself
+        to avoid deadlock.
+        """
         try:
-            with self.lock:
-                data = {
-                    'experiments': {
-                        exp_id: exp.to_dict()
-                        for exp_id, exp in self.experiments.items()
-                    },
-                    'queue_order': self.queue_order
-                }
-                
-                with open(self.queue_file, 'w') as f:
-                    json.dump(data, f, indent=2)
-                    
+            data = {
+                'experiments': {
+                    exp_id: exp.to_dict()
+                    for exp_id, exp in self.experiments.items()
+                },
+                'queue_order': self.queue_order
+            }
+
+            with open(self.queue_file, 'w') as f:
+                json.dump(data, f, indent=2)
+
         except Exception as e:
             logger.error(f"Failed to save queue: {e}")
     
@@ -173,11 +177,18 @@ class QueueManager:
             self._save_queue()
             
             logger.info(f"Added experiment {experiment_id} to queue for user {user_session_id}")
-            
+
+            # Calculate position among active experiments only (queued/paused)
+            queue_position = sum(
+                1 for exp_id in self.queue_order
+                if exp_id in self.experiments and
+                self.experiments[exp_id].status in [ExperimentStatus.QUEUED, ExperimentStatus.PAUSED]
+            )
+
             return {
                 "success": True,
                 "experiment_id": experiment_id,
-                "queue_position": len(self.queue_order)
+                "queue_position": queue_position
             }
     
     def get_next_experiment(self) -> Optional[Experiment]:
@@ -215,11 +226,11 @@ class QueueManager:
                 logger.info(f"Completed experiment {experiment_id} with exit code {exit_code}")
     
     def cancel_experiment(self, experiment_id: str) -> bool:
-        """Cancel experiment"""
+        """Cancel experiment (works for both queued and running experiments)"""
         with self.lock:
             if experiment_id in self.experiments:
                 experiment = self.experiments[experiment_id]
-                if experiment.status == ExperimentStatus.QUEUED:
+                if experiment.status in [ExperimentStatus.QUEUED, ExperimentStatus.RUNNING]:
                     experiment.status = ExperimentStatus.CANCELLED
                     experiment.completed_at = datetime.now()
                     self._save_queue()
@@ -257,15 +268,43 @@ class QueueManager:
             if experiment_id in self.queue_order:
                 # Remove from current position
                 self.queue_order.remove(experiment_id)
-                
+
                 # Insert at new position
                 new_position = max(0, min(new_position, len(self.queue_order)))
                 self.queue_order.insert(new_position, experiment_id)
-                
+
                 self._save_queue()
                 logger.info(f"Reordered experiment {experiment_id} to position {new_position}")
                 return True
             return False
+
+    def run_now(self, experiment_id: str) -> bool:
+        """Move experiment to front of queue and resume if paused
+
+        Returns True if successfully moved to front, False otherwise
+        """
+        with self.lock:
+            if experiment_id not in self.experiments:
+                return False
+
+            experiment = self.experiments[experiment_id]
+
+            # Only works for queued or paused experiments
+            if experiment.status not in [ExperimentStatus.QUEUED, ExperimentStatus.PAUSED]:
+                return False
+
+            # Resume if paused
+            if experiment.status == ExperimentStatus.PAUSED:
+                experiment.status = ExperimentStatus.QUEUED
+
+            # Move to front of queue (position 0)
+            if experiment_id in self.queue_order:
+                self.queue_order.remove(experiment_id)
+            self.queue_order.insert(0, experiment_id)
+
+            self._save_queue()
+            logger.info(f"Moved experiment {experiment_id} to front of queue for immediate execution")
+            return True
     
     def get_experiment_status(self, experiment_id: str) -> Optional[Dict[str, Any]]:
         """Get experiment status"""
@@ -297,10 +336,14 @@ class QueueManager:
             queued_count = len([exp for exp in self.experiments.values() if exp.status == ExperimentStatus.QUEUED])
             running_count = len([exp for exp in self.experiments.values() if exp.status == ExperimentStatus.RUNNING])
             paused_count = len([exp for exp in self.experiments.values() if exp.status == ExperimentStatus.PAUSED])
-            
+
             # Calculate estimated wait time (rough estimate: 10 minutes per experiment)
             estimated_wait_minutes = queued_count * 10
-            
+
+            # Only show active experiments in queue (queued, running, paused)
+            # Exclude completed, failed, and cancelled experiments
+            active_statuses = {ExperimentStatus.QUEUED, ExperimentStatus.RUNNING, ExperimentStatus.PAUSED}
+
             return {
                 "total_queued": queued_count,
                 "total_running": running_count,
@@ -314,7 +357,7 @@ class QueueManager:
                         "created_at": self.experiments[exp_id].created_at.isoformat()
                     }
                     for exp_id in self.queue_order
-                    if exp_id in self.experiments
+                    if exp_id in self.experiments and self.experiments[exp_id].status in active_statuses
                 ]
             }
     

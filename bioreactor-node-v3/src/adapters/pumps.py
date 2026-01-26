@@ -2,12 +2,7 @@
 from pydantic import BaseModel, Field
 from typing import Dict, Any, Optional
 from .base import ComponentAdapter
-import sys
-import os
-
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'bioreactor_v3', 'src'))
-
-from io import set_pump_velocity, stop_pump
+from bioreactor_v3.src.io import change_pump, stop_pump
 
 class PumpControlRequest(BaseModel):
     """Request schema for pump control"""
@@ -53,7 +48,7 @@ class PumpAdapter(ComponentAdapter):
             }
 
         try:
-            set_pump_velocity(self.bioreactor, request.pump_name, request.velocity)
+            change_pump(self.bioreactor, request.pump_name, request.velocity)
             return {
                 "status": "success",
                 "pump_name": request.pump_name,

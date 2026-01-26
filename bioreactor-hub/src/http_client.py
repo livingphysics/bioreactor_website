@@ -62,7 +62,7 @@ class BioreactorNodeHTTPClient:
                     "script_content": script_content,
                     "experiment_id": experiment_id
                 },
-                timeout=10
+                timeout=30  # Increased timeout for Docker operations
             )
             response.raise_for_status()
             logger.info(f"Experiment {experiment_id} started successfully")

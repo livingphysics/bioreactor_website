@@ -61,8 +61,9 @@ class HardwareConfig(DefaultConfig):
     # Logging
     # ========================================================================
     LOG_LEVEL = "INFO"  # DEBUG, INFO, WARNING, ERROR
-    LOG_FILE = "bioreactor.log"  # Local directory for testing
-    DATA_OUT_FILE = "bioreactor_data.csv"  # Local directory for testing
+    LOG_FILE = "/app/logs/bioreactor.log"  # Container path
+    DATA_OUT_FILE = None  # Disable data file for now
+    USE_TIMESTAMPED_FILENAME = False  # Disable timestamp
 
 
 # Create config instance to be imported

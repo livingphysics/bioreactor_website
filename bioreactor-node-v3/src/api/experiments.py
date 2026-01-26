@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 docker_client: Optional[docker.DockerClient] = None
 containers: Dict[str, Dict] = {}
 
+# Get host data path for Docker-in-Docker volume mounts
+# This is the path on the HOST machine where /app/data is mounted from
+HOST_DATA_PATH = os.getenv("HOST_DATA_PATH", "/app/data")
+
 # Pydantic models
 class ExperimentRequest(BaseModel):
     """Request to start an experiment"""
@@ -56,7 +60,7 @@ def create_experiments_router() -> APIRouter:
     router = APIRouter(prefix="/api/experiments", tags=["experiments"])
 
     @router.post("/start")
-    async def start_experiment(request: ExperimentRequest, background_tasks: BackgroundTasks):
+    async def start_experiment(request: ExperimentRequest):
         """Start a new experiment"""
         if not docker_client:
             raise HTTPException(status_code=503, detail="Docker not available")
@@ -79,9 +83,6 @@ def create_experiments_router() -> APIRouter:
         output_dir.mkdir(exist_ok=True)
 
         try:
-            # Start container in background
-            background_tasks.add_task(run_experiment_container, experiment_id, script_file, output_dir)
-
             # Store experiment info
             containers[experiment_id] = {
                 "status": "starting",
@@ -90,6 +91,15 @@ def create_experiments_router() -> APIRouter:
                 "output_dir": str(output_dir),
                 "container": None
             }
+
+            # Start container in separate thread (don't wait for response)
+            import threading
+            thread = threading.Thread(
+                target=run_experiment_container,
+                args=(experiment_id, script_file, output_dir),
+                daemon=True
+            )
+            thread.start()
 
             logger.info(f"Started experiment: {experiment_id}")
             return {
@@ -181,12 +191,16 @@ def create_experiments_router() -> APIRouter:
     @router.get("/{experiment_id}/download")
     async def download_experiment_results(experiment_id: str):
         """Download experiment results as ZIP file"""
-        if experiment_id not in containers:
+        # Check filesystem instead of in-memory dict (persists across restarts)
+        data_dir = Path("/app/data")
+        experiment_dir = data_dir / "experiments" / experiment_id
+
+        if not experiment_dir.exists():
             raise HTTPException(status_code=404, detail="Experiment not found")
 
-        container_info = containers[experiment_id]
-        output_dir = Path(container_info["output_dir"])
-        zip_path = output_dir.parent / "results.zip"
+        output_dir = experiment_dir / "output"
+        script_file = experiment_dir / "user_script.py"
+        zip_path = experiment_dir / "results.zip"
 
         try:
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
@@ -198,7 +212,6 @@ def create_experiments_router() -> APIRouter:
                             zipf.write(file_path, arcname)
 
                 # Add script file
-                script_file = Path(container_info["script_file"])
                 if script_file.exists():
                     zipf.write(script_file, "user_script.py")
 
@@ -282,7 +295,7 @@ def create_experiments_router() -> APIRouter:
     return router
 
 
-async def run_experiment_container(experiment_id: str, script_file: Path, output_dir: Path):
+def run_experiment_container(experiment_id: str, script_file: Path, output_dir: Path):
     """Run experiment in Docker container
 
     Args:
@@ -294,32 +307,39 @@ async def run_experiment_container(experiment_id: str, script_file: Path, output
         # Update status
         containers[experiment_id]["status"] = "running"
 
-        # Run container
-        container = docker_client.containers.run(
+        # Get experiment directory from script file path
+        experiment_dir = script_file.parent
+
+        # Calculate host path for volume mount (Docker-in-Docker requirement)
+        # HOST_DATA_PATH is where /app/data is mounted from on the host machine
+        host_experiments_path = os.path.join(HOST_DATA_PATH, "experiments")
+
+        # Create and start container (use create + start to avoid pulling)
+        # Mount the experiment directory to avoid single-file mount issues
+        container = docker_client.containers.create(
             image="bioreactor-user-experiment:latest",
-            command=["python", "/app/user_script.py"],
+            command=["python", f"/app/experiments/{experiment_id}/user_script.py"],
             volumes={
-                str(output_dir): {
-                    'bind': '/app/output',
+                host_experiments_path: {
+                    'bind': '/app/experiments',
                     'mode': 'rw'
-                },
-                str(script_file): {
-                    'bind': '/app/user_script.py',
-                    'mode': 'ro'
                 }
             },
             environment={
-                "BIOREACTOR_NODE_API_URL": "http://host.docker.internal:9000",
-                "EXPERIMENT_ID": experiment_id
+                "BIOREACTOR_NODE_API_URL": "http://localhost:9000",
+                "EXPERIMENT_ID": experiment_id,
+                "OUTPUT_DIR": f"/app/experiments/{experiment_id}/output"
             },
-            detach=True,
             mem_limit="512m",
             cpu_period=100000,
             cpu_quota=100000,  # 1 CPU core
             network_mode="host",  # Use host network for direct access
             name=f"experiment-{experiment_id}",
-            remove=True
+            auto_remove=False  # Don't auto-remove so we can capture logs
         )
+
+        # Start the container
+        container.start()
 
         # Store container reference
         containers[experiment_id]["container"] = container
@@ -327,10 +347,35 @@ async def run_experiment_container(experiment_id: str, script_file: Path, output
         # Wait for container to complete
         result = container.wait()
 
+        # Capture container logs
+        container_logs = ""
+        try:
+            container_logs = container.logs(stdout=True, stderr=True).decode('utf-8')
+            logs_file = output_dir / "container_logs.txt"
+            with open(logs_file, 'w') as f:
+                f.write(container_logs)
+            logger.info(f"Container logs saved to {logs_file}")
+        except Exception as log_error:
+            logger.warning(f"Failed to capture container logs: {log_error}")
+
+        # Remove container now that we have the logs
+        try:
+            container.remove(force=True)
+            logger.info(f"Container for experiment {experiment_id} removed")
+        except Exception as rm_error:
+            logger.warning(f"Failed to remove container: {rm_error}")
+
         # Update status
         containers[experiment_id]["status"] = "completed" if result["StatusCode"] == 0 else "failed"
         containers[experiment_id]["end_time"] = datetime.now()
         containers[experiment_id]["exit_code"] = result["StatusCode"]
+
+        # Store error message from logs if failed
+        if result["StatusCode"] != 0:
+            try:
+                containers[experiment_id]["error_message"] = container_logs[:500] if container_logs else "Container failed with no logs"
+            except:
+                containers[experiment_id]["error_message"] = f"Container exited with code {result['StatusCode']}"
 
         logger.info(f"Experiment {experiment_id} completed with exit code {result['StatusCode']}")
 

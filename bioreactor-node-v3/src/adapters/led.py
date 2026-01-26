@@ -2,12 +2,7 @@
 from pydantic import BaseModel, Field
 from typing import Dict, Any, Optional
 from .base import ComponentAdapter
-import sys
-import os
-
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'bioreactor_v3', 'src'))
-
-from io import set_led_power
+from bioreactor_v3.src.io import set_led
 
 class LEDControlRequest(BaseModel):
     """Request schema for LED control"""
@@ -49,7 +44,7 @@ class LEDAdapter(ComponentAdapter):
             }
 
         try:
-            set_led_power(self.bioreactor, request.power)
+            set_led(self.bioreactor, request.power)
             return {
                 "status": "success",
                 "power": request.power,

@@ -2,12 +2,7 @@
 from pydantic import BaseModel, Field
 from typing import Dict, Any, Optional, List
 from .base import ComponentAdapter
-import sys
-import os
-
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'bioreactor_v3', 'src'))
-
-from io import set_ring_light_color, set_ring_light_pixel
+from bioreactor_v3.src.io import set_ring_light
 
 class RingLightControlRequest(BaseModel):
     """Request schema for ring light control"""
@@ -19,6 +14,9 @@ class RingLightControlRequest(BaseModel):
 class RingLightStateResponse(BaseModel):
     """Response schema for ring light state"""
     status: str
+    red: int
+    green: int
+    blue: int
     active: bool
     message: Optional[str] = None
 
@@ -51,23 +49,20 @@ class RingLightAdapter(ComponentAdapter):
             }
 
         try:
+            color = (request.red, request.green, request.blue)
             if request.pixel_index is not None:
-                set_ring_light_pixel(
-                    self.bioreactor,
-                    request.pixel_index,
-                    request.red,
-                    request.green,
-                    request.blue
-                )
+                set_ring_light(self.bioreactor, color, pixel=request.pixel_index)
                 msg = f"Pixel {request.pixel_index} set to RGB({request.red},{request.green},{request.blue})"
             else:
-                set_ring_light_color(
-                    self.bioreactor,
-                    request.red,
-                    request.green,
-                    request.blue
-                )
+                set_ring_light(self.bioreactor, color)
                 msg = f"All pixels set to RGB({request.red},{request.green},{request.blue})"
+
+            # Store last color for state tracking
+            ring_light = getattr(self.bioreactor, 'ring_light', None)
+            if ring_light:
+                ring_light._last_red = request.red
+                ring_light._last_green = request.green
+                ring_light._last_blue = request.blue
 
             return {
                 "status": "success",
@@ -86,6 +81,9 @@ class RingLightAdapter(ComponentAdapter):
         if not self.initialized:
             return {
                 "status": "error",
+                "red": 0,
+                "green": 0,
+                "blue": 0,
                 "active": False,
                 "message": "Ring light not initialized"
             }
@@ -93,19 +91,31 @@ class RingLightAdapter(ComponentAdapter):
         try:
             ring_light = getattr(self.bioreactor, 'ring_light', None)
             if ring_light:
+                red = getattr(ring_light, '_last_red', 0)
+                green = getattr(ring_light, '_last_green', 0)
+                blue = getattr(ring_light, '_last_blue', 0)
                 return {
                     "status": "success",
-                    "active": True,
-                    "message": "Ring light operational"
+                    "red": red,
+                    "green": green,
+                    "blue": blue,
+                    "active": any([red, green, blue]),
+                    "message": f"Ring light RGB({red},{green},{blue})"
                 }
             return {
                 "status": "error",
+                "red": 0,
+                "green": 0,
+                "blue": 0,
                 "active": False,
                 "message": "Ring light not found"
             }
         except Exception as e:
             return {
                 "status": "error",
+                "red": 0,
+                "green": 0,
+                "blue": 0,
                 "active": False,
                 "message": str(e)
             }

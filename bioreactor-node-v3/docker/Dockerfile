@@ -15,9 +15,14 @@ RUN pip install --no-cache-dir \
 # Create output directory
 RUN mkdir -p /app/output
 
-# Script and client will be mounted at runtime
-# /app/user_script.py - user's experiment script (read-only)
-# /app/bioreactor_client.py - auto-generated API client (read-only)
+# Copy bioreactor client library
+COPY bioreactor_client.py /app/bioreactor_client.py
+
+# Make client importable
+ENV PYTHONPATH=/app:$PYTHONPATH
+
+# Script will be mounted at runtime
+# /app/experiments/{id}/user_script.py - user's experiment script
 # /app/output - output directory (read-write)
 
 CMD ["python", "/app/user_script.py"]

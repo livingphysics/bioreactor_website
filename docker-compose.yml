@@ -8,10 +8,13 @@ services:
       - "8080:8080"
     environment:
       - BIOREACTOR_HUB_API_URL=http://bioreactor-hub:8000
+      - BIOREACTOR_NODE_API_URL=http://bioreactor-node:9000
     depends_on:
       - bioreactor-hub
     volumes:
       - ./web-server/uploads_tmp:/app/uploads_tmp
+      - ./web-server/config:/app/config
+      - ./bioreactor-node-v3/data:/app/node_data:ro  # Read-only access to experiment data
     networks:
       - bioreactor-network
 
@@ -36,12 +39,14 @@ services:
     ports:
       - "9000:9000"
     environment:
-      - HARDWARE_MODE=simulation  # Set to "real" for physical hardware
+      - HARDWARE_MODE=real  # Set to "real" for physical hardware
       - LOG_LEVEL=INFO
+      - HOST_DATA_PATH=/home/david/Documents/GitHub/bioreactor_website/bioreactor-node-v3/data
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./bioreactor-node-v3/data:/app/data
       - /dev/gpiochip4:/dev/gpiochip4  # Pi 5 GPIO (only for real mode)
+      - /dev/i2c-1:/dev/i2c-1  # I2C bus for CO2 sensor
     privileged: true  # Required for Docker-in-Docker and GPIO access
     networks:
       - bioreactor-network

@@ -2,12 +2,7 @@
 from pydantic import BaseModel, Field
 from typing import Dict, Any, Optional
 from .base import ComponentAdapter
-import sys
-import os
-
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'bioreactor_v3', 'src'))
-
-from io import set_stirrer_speed, stop_stirrer
+from bioreactor_v3.src.io import set_stirrer_speed, stop_stirrer
 
 class StirrerControlRequest(BaseModel):
     """Request schema for stirrer control"""

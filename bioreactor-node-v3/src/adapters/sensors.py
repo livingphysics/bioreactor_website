@@ -2,12 +2,7 @@
 from pydantic import BaseModel, Field
 from typing import Dict, Any, Optional, List
 from .base import ComponentAdapter
-import sys
-import os
-
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'bioreactor_v3', 'src'))
-
-from io import read_temperatures, read_photodiodes, read_eyespy_adc, read_co2
+from bioreactor_v3.src.io import get_temperature, read_voltage, read_eyespy_voltage, read_co2
 
 # Temperature Sensor Adapter
 class TemperatureStateResponse(BaseModel):
@@ -49,7 +44,11 @@ class TemperatureSensorAdapter(ComponentAdapter):
             }
 
         try:
-            temps = read_temperatures(self.bioreactor)
+            # Read all 8 temperature sensors
+            temps = []
+            for i in range(8):
+                temp = get_temperature(self.bioreactor, sensor_index=i)
+                temps.append(temp if temp is not None else float('nan'))
             return {
                 "status": "success",
                 "temperatures": temps,
@@ -102,7 +101,13 @@ class ODSensorAdapter(ComponentAdapter):
             }
 
         try:
-            voltages = read_photodiodes(self.bioreactor)
+            # Read all OD channels - assumes channels are named in config
+            voltages = []
+            # Try to read from configured channels
+            if hasattr(self.bioreactor, 'cfg') and hasattr(self.bioreactor.cfg, 'OD_ADC_CHANNELS'):
+                for channel_name in self.bioreactor.cfg.OD_ADC_CHANNELS.keys():
+                    voltage = read_voltage(self.bioreactor, channel_name)
+                    voltages.append(voltage if voltage is not None else float('nan'))
             return {
                 "status": "success",
                 "voltages": voltages,
@@ -156,7 +161,12 @@ class EyespyAdapter(ComponentAdapter):
             }
 
         try:
-            voltages = read_eyespy_adc(self.bioreactor)
+            # Read all eyespy boards
+            voltages = []
+            if hasattr(self.bioreactor, 'cfg') and hasattr(self.bioreactor.cfg, 'EYESPY_ADC'):
+                for board_name in self.bioreactor.cfg.EYESPY_ADC.keys():
+                    voltage = read_eyespy_voltage(self.bioreactor, board_name)
+                    voltages.append(voltage if voltage is not None else float('nan'))
             return {
                 "status": "success",
                 "voltages": voltages,

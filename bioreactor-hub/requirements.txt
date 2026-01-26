@@ -8,6 +8,7 @@ paramiko==3.3.1
 
 # HTTP communication (v3)
 requests==2.31.0
+httpx==0.25.2
 
 # Environment and configuration
 python-dotenv==1.0.0
