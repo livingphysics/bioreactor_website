@@ -10,7 +10,7 @@ The bioreactor system uses a **hub-and-spoke architecture** with three Docker-ba
 ┌─────────────┐      HTTP API      ┌──────────────┐      HTTP API      ┌─────────────────┐
 │             │◄──────────────────►│              │◄──────────────────►│                 │
 │ Web Server  │                    │     Hub      │                    │  Node (Pi 5)    │
-│  (Port 8080)│                    │ (Port 8000)  │                    │  (Port 9000)    │
+│  (Port 3000)│                    │ (Port 8000)  │                    │  (Port 9000)    │
 └─────────────┘                    └──────────────┘                    └─────────────────┘
    │                                     │                                    │
    ├─ User Interface                    ├─ Queue Manager                     ├─ Hardware Control
@@ -59,7 +59,7 @@ The bioreactor system uses a **hub-and-spoke architecture** with three Docker-ba
 
 ### 3. **Web Server**
 - **Location:** Can run anywhere (same machine or separate)
-- **Port:** 8080
+- **Port:** 3000
 - **Purpose:**
   - User interface for experiment upload
   - Live dashboard with Server-Sent Events (SSE)
@@ -81,7 +81,7 @@ cd bioreactor_website
 docker compose up --build
 
 # Access the services:
-# - Web Server:  http://localhost:8080
+# - Web Server:  http://localhost:3000
 # - Hub API:     http://localhost:8000
 # - Node API:    http://localhost:9000
 ```
@@ -268,7 +268,7 @@ docker compose up -d web-server
 # Or standalone:
 docker run -d \
   --name bioreactor-web-server \
-  -p 8080:8080 \
+  -p 3000:3000 \
   -v ./web-server/config:/app/config \
   -v ./web-server/uploads_tmp:/app/uploads_tmp \
   -v ./bioreactor-node-v3/data:/app/node_data:ro \
@@ -285,10 +285,10 @@ docker run -d \
 #### Step 3: Access Web Interface
 ```bash
 # Open in browser
-http://localhost:8080
+http://localhost:3000
 
 # Or from another machine
-http://<server-ip>:8080
+http://<server-ip>:3000
 ```
 
 ---
@@ -301,7 +301,7 @@ The provided `docker-compose.yml` orchestrates all three components:
 services:
   web-server:
     build: ./web-server
-    ports: ["8080:8080"]
+    ports: ["3000:3000"]
     environment:
       - BIOREACTOR_HUB_API_URL=http://bioreactor-hub:8000
       - BIOREACTOR_NODE_API_URL=http://bioreactor-node:9000
@@ -464,7 +464,7 @@ The web server provides a real-time dashboard using Server-Sent Events (SSE).
 - **Display:** Shows "Data Source: CSV" or "Data Source: Hardware"
 
 ### Dashboard Configuration
-Edit via web UI at `http://localhost:8080/settings`:
+Edit via web UI at `http://localhost:3000/settings`:
 - Enable/disable sensor displays (CO2, temperature, OD, etc.)
 - Adjust update interval (default: 2 seconds)
 - Configure CSV file path
@@ -472,10 +472,10 @@ Edit via web UI at `http://localhost:8080/settings`:
 ### Accessing Dashboard
 ```bash
 # Navigate to:
-http://localhost:8080/dashboard
+http://localhost:3000/dashboard
 
 # SSE endpoint (for custom clients):
-http://localhost:8080/api/live-data
+http://localhost:3000/api/live-data
 ```
 
 ---
@@ -491,7 +491,7 @@ curl http://localhost:9000/api/status
 curl http://localhost:8000/api/queue/status
 
 # Web server (open in browser)
-http://localhost:8080
+http://localhost:3000
 ```
 
 ### 2. Test Experiment Upload
@@ -508,7 +508,7 @@ print(f"CO2: {data.get('co2_ppm')} ppm")
 EOF
 
 # Upload via web interface
-# Navigate to http://localhost:8080/upload
+# Navigate to http://localhost:3000/upload
 # Or use API:
 curl -X POST http://localhost:8000/api/experiments/start \
   -H "Content-Type: application/json" \
@@ -525,13 +525,13 @@ curl http://localhost:8000/api/queue/status
 docker logs -f bioreactor-node-v3
 
 # View in web UI
-http://localhost:8080/my-experiments
+http://localhost:3000/my-experiments
 ```
 
 ### 4. Download Results
 ```bash
 # Via web UI:
-http://localhost:8080/my-experiments → Download button
+http://localhost:3000/my-experiments → Download button
 
 # Or via API:
 curl -O http://localhost:8000/api/experiments/{id}/download

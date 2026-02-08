@@ -214,7 +214,7 @@ curl http://localhost:9000/api/sensors/all
 
 ## Step 7: Test Through Web Interface
 
-1. Open browser to http://localhost:8080
+1. Open browser to http://localhost:3000
 2. You should see the web interface
 3. Upload a simple test script:
 

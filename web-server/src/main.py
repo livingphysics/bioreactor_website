@@ -8,7 +8,7 @@ import httpx
 import io
 import uuid
 import json
-from src.live_data import stream_sensor_data
+from src.live_data import stream_sensor_data, get_sensor_data
 
 # App setup
 app = FastAPI(title="Bioreactor Web Server", description="User interface for bioreactor experiments.")
@@ -289,12 +289,10 @@ def dashboard(request: Request):
     return response
 
 @app.get("/api/live-data")
-async def live_data_stream(request: Request):
-    """Stream real-time sensor data via Server-Sent Events (SSE)"""
-    return StreamingResponse(
-        stream_sensor_data(HUB_API_URL),
-        media_type="text/event-stream"
-    )
+async def live_data_poll(request: Request):
+    """Fetch current sensor data (polling endpoint)"""
+    data = await get_sensor_data(HUB_API_URL)
+    return data
 
 # Dashboard Settings
 @app.get("/settings", response_class=HTMLResponse)

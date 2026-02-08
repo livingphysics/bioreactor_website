@@ -9,7 +9,3 @@ httpx==0.25.2
 
 # Environment and configuration
 python-dotenv==1.0.0
-
-# Development
-pytest==7.4.3
-pytest-asyncio==0.21.1

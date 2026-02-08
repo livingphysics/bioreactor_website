@@ -14,3 +14,4 @@ matplotlib>=3.7.0
 numpy>=1.24.0
 pandas>=2.0.0
 atlas-i2c>=0.3.1
+ds18b20>=0.01.03

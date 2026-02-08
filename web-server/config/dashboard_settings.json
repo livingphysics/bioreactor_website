@@ -1,7 +1,7 @@
 {
   "display_components": {
-    "co2_sensor": true,
-    "temperature": false,
+    "co2_sensor": false,
+    "temperature": true,
     "photodiodes": false,
     "peltier_current": false
   },

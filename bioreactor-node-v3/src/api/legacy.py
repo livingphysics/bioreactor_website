@@ -110,7 +110,7 @@ def create_legacy_router(bioreactor) -> APIRouter:
 
         if 'temp_sensor' in adapters:
             temp_data = await adapters['temp_sensor'].read_state()
-            result['vial_temperatures'] = temp_data.get('temperatures', [])
+            result['temperature'] = temp_data.get('temperature', None)
 
         if 'optical_density' in adapters:
             od_data = await adapters['optical_density'].read_state()
@@ -143,7 +143,7 @@ def create_legacy_router(bioreactor) -> APIRouter:
         temp_data = await adapters['temp_sensor'].read_state()
         return {
             "status": "success",
-            "temperatures": temp_data.get('temperatures', [])
+            "temperature": temp_data.get('temperature', None)
         }
 
     @router.get("/status")

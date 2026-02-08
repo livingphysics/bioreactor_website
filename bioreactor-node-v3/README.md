@@ -65,7 +65,7 @@ bioreactor-node-v3/
 docker-compose up --build
 
 # Access points:
-# - Web Server: http://localhost:8080
+# - Web Server: http://localhost:3000
 # - Bioreactor Hub: http://localhost:8000
 # - Bioreactor Node v3: http://localhost:9000
 ```
@@ -343,7 +343,7 @@ curl http://localhost:9000/api/sensors/all
 
 ### Submit Test Experiment
 
-Through web interface at http://localhost:8080 or via hub API:
+Through web interface at http://localhost:3000 or via hub API:
 
 ```bash
 curl -X POST http://localhost:8000/api/experiments/start \

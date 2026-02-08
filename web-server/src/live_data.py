@@ -162,7 +162,7 @@ async def get_sensor_data_from_hardware(config: Dict[str, Any]) -> Dict[str, Any
                     if response.status_code == 200:
                         data = response.json()
                         if display.get("temperature"):
-                            result["temperatures"] = data.get("vial_temperatures", [])
+                            result["temperature"] = data.get("temperature", None)
                         if display.get("photodiodes"):
                             result["photodiodes"] = data.get("photodiodes", [])
                         if display.get("peltier_current"):
