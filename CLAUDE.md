@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a distributed bioreactor control system with three independently containerized components that communicate via REST APIs and SSH:
 
-1. **Web Server** (Port 8080): User interface for uploading scripts and managing experiments
+1. **Web Server** (Port 3000): User interface for uploading scripts and managing experiments
 2. **Bioreactor Hub** (Port 8000): Middleware for experiment queuing and orchestration
 3. **Bioreactor Node** (Port 9000): Hardware interface and Docker container manager for user experiments
 
@@ -21,7 +21,7 @@ The system implements a **hub-and-spoke architecture** with queue-based experime
 docker-compose up --build
 
 # Access points:
-# - Web Server: http://localhost:8080
+# - Web Server: http://localhost:3000
 # - Bioreactor Hub: http://localhost:8000
 # - Bioreactor Node: http://localhost:9000
 ```
@@ -32,7 +32,7 @@ docker-compose up --build
 ```bash
 cd web-server
 pip install -r requirements.txt
-uvicorn src.main:app --reload --port 8080
+uvicorn src.main:app --reload --port 3000
 ```
 
 #### Bioreactor Hub

@@ -219,34 +219,27 @@
             }
 
             // Update Temperature
-            if (data.temperatures && Array.isArray(data.temperatures) && data.temperatures.length > 0) {
+            if (data.temperature !== null && data.temperature !== undefined) {
                 document.getElementById('temp-container').style.display = 'block';
 
-                // Initialize datasets if needed
+                // Initialize dataset if needed
                 if (charts.temp.data.datasets.length === 0) {
-                    const colors = ['rgb(255, 99, 132)', 'rgb(54, 162, 235)', 'rgb(255, 206, 86)', 'rgb(75, 192, 192)'];
-                    data.temperatures.forEach((_, i) => {
-                        charts.temp.data.datasets.push({
-                            label: `Vial ${i + 1}`,
-                            data: [],
-                            borderColor: colors[i % colors.length],
-                            backgroundColor: colors[i % colors.length].replace('rgb', 'rgba').replace(')', ', 0.1)'),
-                            tension: 0.1,
-                            fill: false
-                        });
+                    charts.temp.data.datasets.push({
+                        label: 'Temperature',
+                        data: [],
+                        borderColor: 'rgb(255, 99, 132)',
+                        backgroundColor: 'rgba(255, 99, 132, 0.1)',
+                        tension: 0.1,
+                        fill: false
                     });
                 }
 
                 charts.temp.data.labels.push(timeLabel);
-                data.temperatures.forEach((temp, i) => {
-                    if (charts.temp.data.datasets[i]) {
-                        charts.temp.data.datasets[i].data.push(temp);
-                    }
-                });
+                charts.temp.data.datasets[0].data.push(data.temperature);
 
                 if (charts.temp.data.labels.length > MAX_DATA_POINTS) {
                     charts.temp.data.labels.shift();
-                    charts.temp.data.datasets.forEach(ds => ds.data.shift());
+                    charts.temp.data.datasets[0].data.shift();
                 }
                 charts.temp.update('none');
             }
@@ -297,39 +290,30 @@
             }
         }
 
-        // Server-Sent Events connection
-        let eventSource;
+        // Poll for live data
+        const POLL_INTERVAL = 2000; // 2 seconds
+        let pollTimer;
 
-        function connectSSE() {
-            eventSource = new EventSource('/api/live-data');
-
-            eventSource.onopen = function(event) {
-                console.log('SSE connection opened');
+        async function pollData() {
+            try {
+                const response = await fetch('/api/live-data');
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+                console.log('Received data:', data);
                 updateConnectionStatus(true);
-            };
-
-            eventSource.onmessage = function(event) {
-                try {
-                    const data = JSON.parse(event.data);
-                    console.log('Received data:', data);
-                    updateChart(data);
-                } catch (error) {
-                    console.error('Error parsing SSE data:', error);
-                }
-            };
-
-            eventSource.onerror = function(event) {
-                console.error('SSE error:', event);
+                updateChart(data);
+            } catch (error) {
+                console.error('Poll error:', error);
                 updateConnectionStatus(false);
-                eventSource.close();
-                setTimeout(connectSSE, 5000);
-            };
+            }
         }
 
-        connectSSE();
+        // Start polling
+        pollData();
+        pollTimer = setInterval(pollData, POLL_INTERVAL);
 
         window.addEventListener('beforeunload', function() {
-            if (eventSource) eventSource.close();
+            if (pollTimer) clearInterval(pollTimer);
         });
     </script>
 </body>

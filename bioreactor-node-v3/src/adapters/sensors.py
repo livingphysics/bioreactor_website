@@ -1,4 +1,5 @@
 """Sensor adapters for temperature, OD, eyespy, and CO2"""
+import math
 from pydantic import BaseModel, Field
 from typing import Dict, Any, Optional, List
 from .base import ComponentAdapter
@@ -6,22 +7,22 @@ from bioreactor_v3.src.io import get_temperature, read_voltage, read_eyespy_volt
 
 # Temperature Sensor Adapter
 class TemperatureStateResponse(BaseModel):
-    """Response schema for temperature sensors"""
+    """Response schema for temperature sensor"""
     status: str
-    temperatures: List[float]
+    temperature: Optional[float]
     unit: str = "celsius"
     message: Optional[str] = None
 
 class TemperatureSensorAdapter(ComponentAdapter):
-    """Adapter for DS18B20 temperature sensors"""
+    """Adapter for DS18B20 temperature sensor"""
 
     def get_capabilities(self) -> Dict[str, Any]:
         return {
             "type": "sensor",
             "sensor_type": "temperature",
-            "count": 8,
+            "count": 1,
             "unit": "celsius",
-            "description": "DS18B20 temperature sensors (one per vial)"
+            "description": "DS18B20 temperature sensor"
         }
 
     def get_control_schema(self) -> Optional[type[BaseModel]]:
@@ -35,29 +36,27 @@ class TemperatureSensorAdapter(ComponentAdapter):
         return {"status": "error", "message": "Sensors do not support control operations"}
 
     async def read_state(self) -> Dict[str, Any]:
-        """Read all temperature sensors"""
+        """Read temperature sensor"""
         if not self.initialized:
             return {
                 "status": "error",
-                "temperatures": [],
-                "message": "Temperature sensors not initialized"
+                "temperature": None,
+                "message": "Temperature sensor not initialized"
             }
 
         try:
-            # Read all 8 temperature sensors
-            temps = []
-            for i in range(8):
-                temp = get_temperature(self.bioreactor, sensor_index=i)
-                temps.append(temp if temp is not None else float('nan'))
+            temp = get_temperature(self.bioreactor, sensor_index=0)
+            if temp is None or (isinstance(temp, float) and math.isnan(temp)):
+                temp = None
             return {
                 "status": "success",
-                "temperatures": temps,
+                "temperature": temp,
                 "unit": "celsius"
             }
         except Exception as e:
             return {
                 "status": "error",
-                "temperatures": [],
+                "temperature": None,
                 "message": str(e)
             }
 
@@ -66,7 +65,7 @@ class TemperatureSensorAdapter(ComponentAdapter):
 class ODStateResponse(BaseModel):
     """Response schema for optical density sensors"""
     status: str
-    voltages: List[float]
+    voltages: List[Optional[float]]
     unit: str = "volts"
     message: Optional[str] = None
 
@@ -107,7 +106,10 @@ class ODSensorAdapter(ComponentAdapter):
             if hasattr(self.bioreactor, 'cfg') and hasattr(self.bioreactor.cfg, 'OD_ADC_CHANNELS'):
                 for channel_name in self.bioreactor.cfg.OD_ADC_CHANNELS.keys():
                     voltage = read_voltage(self.bioreactor, channel_name)
-                    voltages.append(voltage if voltage is not None else float('nan'))
+                    if voltage is None or (isinstance(voltage, float) and math.isnan(voltage)):
+                        voltages.append(None)
+                    else:
+                        voltages.append(voltage)
             return {
                 "status": "success",
                 "voltages": voltages,
@@ -125,7 +127,7 @@ class ODSensorAdapter(ComponentAdapter):
 class EyespyStateResponse(BaseModel):
     """Response schema for eyespy ADC"""
     status: str
-    voltages: List[float]
+    voltages: List[Optional[float]]
     unit: str = "volts"
     message: Optional[str] = None
 
@@ -166,7 +168,10 @@ class EyespyAdapter(ComponentAdapter):
             if hasattr(self.bioreactor, 'cfg') and hasattr(self.bioreactor.cfg, 'EYESPY_ADC'):
                 for board_name in self.bioreactor.cfg.EYESPY_ADC.keys():
                     voltage = read_eyespy_voltage(self.bioreactor, board_name)
-                    voltages.append(voltage if voltage is not None else float('nan'))
+                    if voltage is None or (isinstance(voltage, float) and math.isnan(voltage)):
+                        voltages.append(None)
+                    else:
+                        voltages.append(voltage)
             return {
                 "status": "success",
                 "voltages": voltages,

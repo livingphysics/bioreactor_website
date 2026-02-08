@@ -5,7 +5,7 @@ services:
   web-server:
     build: ./web-server
     ports:
-      - "8080:8080"
+      - "3000:3000"
     environment:
       - BIOREACTOR_HUB_API_URL=http://bioreactor-hub:8000
       - BIOREACTOR_NODE_API_URL=http://bioreactor-node:9000
