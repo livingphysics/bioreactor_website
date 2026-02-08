@@ -8,13 +8,13 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY src/ .
+COPY src/ ./src/
 
-# Create SSH keys directory
-RUN mkdir -p /app/ssh_keys
+# Create data and SSH keys directories
+RUN mkdir -p /app/data /app/ssh_keys
 
 # Expose port
 EXPOSE 8000
 
 # Run the application
-CMD ["python", "main.py"] 
+CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"] 

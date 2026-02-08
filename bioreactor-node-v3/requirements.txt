@@ -1,0 +1,16 @@
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.5.0
+docker>=7.0.0
+python-multipart>=0.0.6
+httpx>=0.26.0
+
+# Import bioreactor_v3 dependencies
+lgpio>=0.2.2.0
+pi5neo>=0.7
+smbus2>=0.4.3
+adafruit-circuitpython-ads1x15>=2.2.21
+matplotlib>=3.7.0
+numpy>=1.24.0
+pandas>=2.0.0
+atlas-i2c>=0.3.1

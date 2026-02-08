@@ -8,6 +8,7 @@ import httpx
 import io
 import uuid
 import json
+from src.live_data import stream_sensor_data
 
 # App setup
 app = FastAPI(title="Bioreactor Web Server", description="User interface for bioreactor experiments.")
@@ -68,18 +69,18 @@ async def upload_script(request: Request, file: UploadFile = File(...)):
     
     # Submit to hub with session ID
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"{HUB_API_URL}/api/experiments/start",
                 json={"script_content": content.decode("utf-8")},
                 headers={"X-Session-ID": session_id}
             )
-        
+
         if resp.status_code == 200:
             data = resp.json()
             experiment_id = data.get("experiment_id")
             queue_position = data.get("queue_position")
-            
+
             return templates.TemplateResponse(
                 "upload.html", {
                     "request": request,
@@ -90,11 +91,22 @@ async def upload_script(request: Request, file: UploadFile = File(...)):
             )
         else:
             return templates.TemplateResponse(
-                "upload.html", {"request": request, "error": f"Hub error: {resp.text}"}
+                "upload.html", {"request": request, "error": f"Hub error (status {resp.status_code}): {resp.text}"}
             )
-    except Exception as e:
+    except httpx.TimeoutException as e:
         return templates.TemplateResponse(
-            "upload.html", {"request": request, "error": f"Failed to submit to hub: {e}"}
+            "upload.html", {"request": request, "error": f"Request timeout: Hub took too long to respond. {str(e)}"}
+        )
+    except httpx.ConnectError as e:
+        return templates.TemplateResponse(
+            "upload.html", {"request": request, "error": f"Connection error: Could not connect to hub. {str(e)}"}
+        )
+    except Exception as e:
+        import traceback
+        error_details = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
+        print(f"Upload error: {error_details}")  # Log to console
+        return templates.TemplateResponse(
+            "upload.html", {"request": request, "error": f"Failed to submit to hub: {type(e).__name__} - {str(e) or 'Unknown error'}"}
         )
 
 @app.get("/queue", response_class=HTMLResponse)
@@ -124,29 +136,29 @@ async def experiment_status(request: Request, experiment_id: str):
     
     # Query hub for experiment status
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(f"{HUB_API_URL}/api/experiments/{experiment_id}/status")
-        
-        if resp.status_code == 200:
-            data = resp.json()
-            experiment = data.get("experiment", {})
-            
-            # Get queue status for wait time estimation
-            queue_resp = await client.get(f"{HUB_API_URL}/api/queue/status")
-            queue_data = queue_resp.json() if queue_resp.status_code == 200 else {}
-            
-            return templates.TemplateResponse(
-                "experiment_status.html", {
-                    "request": request, 
-                    "experiment": experiment, 
-                    "experiment_id": experiment_id,
-                    "queue_data": queue_data
-                }
-            )
-        else:
-            return templates.TemplateResponse(
-                "experiment_status.html", {"request": request, "error": f"Hub error: {resp.text}", "experiment_id": experiment_id}
-            )
+
+            if resp.status_code == 200:
+                data = resp.json()
+                experiment = data.get("experiment", {})
+
+                # Get queue status for wait time estimation
+                queue_resp = await client.get(f"{HUB_API_URL}/api/queue/status")
+                queue_data = queue_resp.json() if queue_resp.status_code == 200 else {}
+
+                return templates.TemplateResponse(
+                    "experiment_status.html", {
+                        "request": request,
+                        "experiment": experiment,
+                        "experiment_id": experiment_id,
+                        "queue_data": queue_data
+                    }
+                )
+            else:
+                return templates.TemplateResponse(
+                    "experiment_status.html", {"request": request, "error": f"Hub error: {resp.text}", "experiment_id": experiment_id}
+                )
     except Exception as e:
         return templates.TemplateResponse(
             "experiment_status.html", {"request": request, "error": f"Failed to contact hub: {e}", "experiment_id": experiment_id}
@@ -228,11 +240,25 @@ async def reorder_experiment_api(experiment_id: str, new_position: int):
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(f"{HUB_API_URL}/api/experiments/{experiment_id}/reorder?new_position={new_position}")
-        
+
         if resp.status_code == 200:
             return {"success": True, "message": "Experiment reordered successfully"}
         else:
             return {"success": False, "message": f"Failed to reorder: {resp.text}"}
+    except Exception as e:
+        return {"success": False, "message": f"Error: {e}"}
+
+@app.post("/api/experiments/{experiment_id}/run-now")
+async def run_experiment_now_api(experiment_id: str):
+    """Run experiment immediately (stops current experiment if needed)"""
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(f"{HUB_API_URL}/api/experiments/{experiment_id}/run-now")
+
+        if resp.status_code == 200:
+            return {"success": True, "message": "Experiment will run immediately"}
+        else:
+            return {"success": False, "message": f"Failed to run now: {resp.text}"}
     except Exception as e:
         return {"success": False, "message": f"Error: {e}"}
 
@@ -251,4 +277,52 @@ async def download_experiment_results(experiment_id: str):
         else:
             raise HTTPException(status_code=resp.status_code, detail=f"Hub error: {resp.text}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to download results: {e}") 
+        raise HTTPException(status_code=500, detail=f"Failed to download results: {e}")
+
+# Live Dashboard
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard(request: Request):
+    """Real-time sensor data dashboard"""
+    session_id = get_or_create_session_id(request)
+    response = templates.TemplateResponse("dashboard.html", {"request": request})
+    response.set_cookie(key="session_id", value=session_id, httponly=True)
+    return response
+
+@app.get("/api/live-data")
+async def live_data_stream(request: Request):
+    """Stream real-time sensor data via Server-Sent Events (SSE)"""
+    return StreamingResponse(
+        stream_sensor_data(HUB_API_URL),
+        media_type="text/event-stream"
+    )
+
+# Dashboard Settings
+@app.get("/settings", response_class=HTMLResponse)
+def settings_page(request: Request):
+    """Dashboard settings page"""
+    from src.live_data import load_dashboard_config
+    session_id = get_or_create_session_id(request)
+    config = load_dashboard_config()
+    response = templates.TemplateResponse("settings.html", {"request": request, "config": config})
+    response.set_cookie(key="session_id", value=session_id, httponly=True)
+    return response
+
+@app.post("/api/settings/dashboard")
+async def update_dashboard_settings(request: Request):
+    """Update dashboard configuration"""
+    from src.live_data import save_dashboard_config
+    try:
+        data = await request.json()
+        success = save_dashboard_config(data)
+        if success:
+            return {"status": "success", "message": "Settings saved"}
+        else:
+            return {"status": "error", "message": "Failed to save settings"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.get("/api/settings/dashboard")
+async def get_dashboard_settings():
+    """Get current dashboard configuration"""
+    from src.live_data import load_dashboard_config
+    return load_dashboard_config()

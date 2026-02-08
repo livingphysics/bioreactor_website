@@ -1,0 +1,3 @@
+[submodule "bioreactor-node-v3/bioreactor_v3"]
+	path = bioreactor-node-v3/bioreactor_v3
+	url = ../bioreactor_v3

@@ -1,338 +1,708 @@
-# Bioreactor System Deployment Guide
+# Bioreactor System Deployment Guide (v3)
 
-This guide explains how to deploy the three components of the bioreactor system.
+This guide explains how to deploy the three-component bioreactor system using the v3 architecture.
+
+## System Architecture
+
+The bioreactor system uses a **hub-and-spoke architecture** with three Docker-based components:
+
+```
+┌─────────────┐      HTTP API      ┌──────────────┐      HTTP API      ┌─────────────────┐
+│             │◄──────────────────►│              │◄──────────────────►│                 │
+│ Web Server  │                    │     Hub      │                    │  Node (Pi 5)    │
+│  (Port 8080)│                    │ (Port 8000)  │                    │  (Port 9000)    │
+└─────────────┘                    └──────────────┘                    └─────────────────┘
+   │                                     │                                    │
+   ├─ User Interface                    ├─ Queue Manager                     ├─ Hardware Control
+   ├─ Experiment Upload                 ├─ Experiment Orchestration          ├─ V3 API Adapters
+   ├─ Live Dashboard (SSE)              ├─ State Persistence                 └─ Docker-in-Docker
+   └─ Session Management                └─ HTTP Forwarding                        User Containers
+```
+
+**Communication:** All components communicate via HTTP REST APIs (no SSH required).
+
+**Deployment:** Docker Compose for orchestration, all services run in containers.
 
 ## Prerequisites
 
-- Docker and Docker Compose installed
-- SSH access between machines
-- Python 3.9+ (for local development)
+- **Docker & Docker Compose** installed on all machines
+- **Raspberry Pi 5** for the bioreactor-node (recommended)
+- **Network connectivity** between all components (HTTP ports open)
+- **Git** for cloning the repository
 
 ## Component Overview
 
-1. **bioreactor-node**: Runs on the actual bioreactor hardware
-2. **bioreactor-hub**: Runs on an intermediate server
-3. **web-server**: Runs on your local machine or cloud server
+### 1. **Bioreactor Node (bioreactor-node-v3)**
+- **Location:** Runs on Raspberry Pi 5 with bioreactor hardware
+- **Port:** 9000
+- **Purpose:**
+  - Hardware interface using v3 modular adapters
+  - Runs user experiment containers via Docker-in-Docker
+  - Dynamic API endpoints based on available hardware
+- **Hardware Support:**
+  - CO2 sensor (Atlas Scientific I2C)
+  - Temperature sensors (DS18B20)
+  - Optical density (ADS7830 ADC)
+  - Eyespy ADC (ADS1115)
+  - Pumps (TicUSB steppers)
+  - Stirrer (PWM motor)
+  - Peltier driver (PWM H-bridge)
 
-## Quick Start (Local Development)
+### 2. **Bioreactor Hub**
+- **Location:** Can run anywhere (same machine as node or separate server)
+- **Port:** 8000
+- **Purpose:**
+  - Experiment queue management (FIFO, one at a time)
+  - State persistence (JSON-based)
+  - HTTP forwarding to node
+  - Background worker for experiment execution
 
-For local development and testing, you can run all components using Docker Compose:
+### 3. **Web Server**
+- **Location:** Can run anywhere (same machine or separate)
+- **Port:** 8080
+- **Purpose:**
+  - User interface for experiment upload
+  - Live dashboard with Server-Sent Events (SSE)
+  - Session-based user tracking
+  - Experiment result downloads
+
+---
+
+## Quick Start (All-in-One Deployment)
+
+For local development or single-machine deployment:
 
 ```bash
 # Clone the repository
 git clone <your-repo-url>
 cd bioreactor_website
 
-# Build and run all components
-docker-compose up --build
+# Start all three components
+docker compose up --build
 
-# The services will be available at:
-# - Web Server: http://localhost:5000
-# - Bioreactor Hub: http://localhost:8000
-# - Bioreactor Node: http://localhost:9000
+# Access the services:
+# - Web Server:  http://localhost:8080
+# - Hub API:     http://localhost:8000
+# - Node API:    http://localhost:9000
 ```
+
+This starts:
+- Web Server → Hub → Node (all communicating via HTTP)
+- Shared Docker network for inter-container communication
+- Volume mounts for data persistence
+
+---
 
 ## Production Deployment
 
-### 1. Deploy Bioreactor Node
+### 1. Deploy Bioreactor Node (Raspberry Pi 5)
 
-The bioreactor-node runs directly on the bioreactor hardware (e.g., Raspberry Pi).
+The node must run on the Raspberry Pi 5 with hardware access.
 
+#### Step 1: Clone Repository
 ```bash
-# On the bioreactor hardware machine
+ssh pi@<raspberry-pi-ip>
+cd ~
 git clone <your-repo-url>
-cd bioreactor_website/bioreactor-node
-
-# Build the Docker image
-docker build -t bioreactor-node .
-
-# Run in simulation mode (for testing)
-docker run -d --name bioreactor-node -p 9000:9000 \
-  -e HARDWARE_MODE=simulation \
-  bioreactor-node
-
-# Run with real hardware (production)
-docker run -d --name bioreactor-node -p 9000:9000 \
-  --privileged \
-  -e HARDWARE_MODE=real \
-  -v /dev:/dev \
-  bioreactor-node
+cd bioreactor_website/bioreactor-node-v3
 ```
 
+#### Step 2: Configure Hardware
+Edit `config_hardware.py` to enable available hardware:
+
+```python
+INIT_COMPONENTS = {
+    'co2_sensor': True,      # Atlas Scientific CO2 sensor (I2C)
+    'temp_sensor': True,     # DS18B20 temperature sensors
+    'optical_density': True, # ADS7830 photodiode ADC
+    'eyespy_adc': True,      # ADS1115 high-precision ADC
+    'pumps': True,           # TicUSB stepper pumps
+    'stirrer': True,         # PWM stirrer motor
+    'peltier_driver': True,  # PWM peltier driver
+    'led': False,            # Optional LED indicator
+    'ring_light': False,     # Optional NeoPixel ring
+}
+
+# CO2 sensor configuration
+CO2_SENSOR_TYPE = 'atlas'  # or 'sensair_k33'
+CO2_SENSOR_I2C_ADDRESS = 0x69
+
+# Hardware mode
+HARDWARE_MODE = 'real'  # or 'simulation' for testing
+```
+
+#### Step 3: Build Container
+```bash
+cd /home/pi/bioreactor_website
+docker compose build bioreactor-node
+```
+
+#### Step 4: Run Node
+```bash
+# Using docker-compose (recommended)
+docker compose up -d bioreactor-node
+
+# Or standalone:
+docker run -d \
+  --name bioreactor-node-v3 \
+  --privileged \
+  -p 9000:9000 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v ./bioreactor-node-v3/data:/app/data \
+  -v /dev/gpiochip4:/dev/gpiochip4 \
+  -v /dev/i2c-1:/dev/i2c-1 \
+  -e HARDWARE_MODE=real \
+  bioreactor-node-v3
+```
+
+**Important Volume Mounts:**
+- `/var/run/docker.sock` - Required for Docker-in-Docker
+- `/dev/gpiochip4` - Raspberry Pi 5 GPIO access
+- `/dev/i2c-1` - I2C bus for sensors
+- `./data` - Experiment data persistence
+
 **Environment Variables:**
-- `HARDWARE_MODE`: Set to `real` for actual hardware, `simulation` for testing
+- `HARDWARE_MODE`: `real` or `simulation`
+- `LOG_LEVEL`: `INFO`, `DEBUG`, `WARNING`, `ERROR`
+
+#### Step 5: Verify Node
+```bash
+# Check if node is running
+curl http://localhost:9000/api/status
+
+# Check available hardware capabilities
+curl http://localhost:9000/api/v3/capabilities
+
+# Test CO2 sensor
+curl http://localhost:9000/api/v3/co2_sensor/state
+```
+
+---
 
 ### 2. Deploy Bioreactor Hub
 
-The bioreactor-hub runs on an intermediate server that manages experiments and communicates with the bioreactor-node.
+The hub can run on the same Pi as the node or on a separate server.
 
+#### Step 1: Configure Environment
 ```bash
-# On the bioreactor-hub machine
-git clone <your-repo-url>
-cd bioreactor_website/bioreactor-hub
+cd bioreactor-hub
 
-# Build the Docker image
-docker build -t bioreactor-hub .
-
-# Create environment file
+# Create environment file (optional, has defaults)
 cat > .env << EOF
-BIOREACTOR_NODE_HOST=<bioreactor-node-ip>
-BIOREACTOR_NODE_PORT=22
-BIOREACTOR_NODE_USERNAME=pi
-SSH_KEY_PATH=/app/ssh_keys/id_rsa
-EXPERIMENT_DATA_DIR=/app/data
-MAX_EXPERIMENT_DURATION=86400
-CONTAINER_MEMORY_LIMIT=512m
+BIOREACTOR_NODE_API_URL=http://bioreactor-node:9000
+LOG_LEVEL=INFO
 EOF
+```
 
-# Run the hub
-docker run -d --name bioreactor-hub -p 8000:8000 \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v $(pwd)/data:/app/data \
-  -v $(pwd)/ssh_keys:/app/ssh_keys \
-  --env-file .env \
+**If deploying hub on separate machine:**
+```bash
+# Update docker-compose.yml or use environment variable
+export BIOREACTOR_NODE_API_URL=http://<raspberry-pi-ip>:9000
+```
+
+#### Step 2: Build and Run
+```bash
+cd /home/pi/bioreactor_website
+
+# Using docker-compose (recommended)
+docker compose up -d bioreactor-hub
+
+# Or standalone:
+docker run -d \
+  --name bioreactor-hub \
+  -p 8000:8000 \
+  -v ./bioreactor-hub/data:/app/data \
+  -e BIOREACTOR_NODE_API_URL=http://bioreactor-node:9000 \
   bioreactor-hub
 ```
 
+**Volume Mounts:**
+- `./data` - Queue persistence (experiment_queue.json)
+
 **Environment Variables:**
-- `BIOREACTOR_NODE_HOST`: IP address of the bioreactor-node machine
-- `BIOREACTOR_NODE_PORT`: SSH port (usually 22)
-- `BIOREACTOR_NODE_USERNAME`: SSH username
-- `SSH_KEY_PATH`: Path to SSH private key for bioreactor-node access
-- `EXPERIMENT_DATA_DIR`: Directory for storing experiment results
-- `MAX_EXPERIMENT_DURATION`: Maximum experiment duration in seconds
-- `CONTAINER_MEMORY_LIMIT`: Memory limit for user experiment containers
+- `BIOREACTOR_NODE_API_URL`: Node API endpoint (default: `http://bioreactor-node:9000`)
+
+#### Step 3: Verify Hub
+```bash
+# Check hub status
+curl http://localhost:8000/api/queue/status
+
+# Should return:
+# {
+#   "total_queued": 0,
+#   "total_running": 0,
+#   "queue": []
+# }
+```
+
+---
 
 ### 3. Deploy Web Server
 
-The web-server provides the user interface for uploading scripts and managing experiments.
+The web server can run anywhere with network access to the hub.
 
+#### Step 1: Configure Environment
 ```bash
-# On your local machine or cloud server
-git clone <your-repo-url>
-cd bioreactor_website/web-server
+cd web-server
 
-# Build the Docker image
-docker build -t bioreactor-web-server .
-
-# Create environment file
+# Create environment file (optional, has defaults)
 cat > .env << EOF
-BIOREACTOR_HUB_HOST=<bioreactor-hub-ip>
-BIOREACTOR_HUB_PORT=22
-SSH_KEY_PATH=/app/ssh_keys/id_rsa
-UPLOAD_FOLDER=/app/uploads
-MAX_CONTENT_LENGTH=10485760
-SECRET_KEY=your-secret-key-here
+BIOREACTOR_HUB_API_URL=http://bioreactor-hub:8000
+BIOREACTOR_NODE_API_URL=http://bioreactor-node:9000
 EOF
+```
 
-# Run the web server
-docker run -d --name bioreactor-web-server -p 5000:5000 \
-  -v $(pwd)/uploads:/app/uploads \
-  -v $(pwd)/ssh_keys:/app/ssh_keys \
-  --env-file .env \
+**If deploying web server on separate machine:**
+```bash
+export BIOREACTOR_HUB_API_URL=http://<hub-ip>:8000
+export BIOREACTOR_NODE_API_URL=http://<node-ip>:9000
+```
+
+#### Step 2: Build and Run
+```bash
+cd /home/pi/bioreactor_website
+
+# Using docker-compose (recommended)
+docker compose up -d web-server
+
+# Or standalone:
+docker run -d \
+  --name bioreactor-web-server \
+  -p 8080:8080 \
+  -v ./web-server/config:/app/config \
+  -v ./web-server/uploads_tmp:/app/uploads_tmp \
+  -v ./bioreactor-node-v3/data:/app/node_data:ro \
+  -e BIOREACTOR_HUB_API_URL=http://bioreactor-hub:8000 \
+  -e BIOREACTOR_NODE_API_URL=http://bioreactor-node:9000 \
   bioreactor-web-server
 ```
 
-**Environment Variables:**
-- `BIOREACTOR_HUB_HOST`: IP address of the bioreactor-hub machine
-- `BIOREACTOR_HUB_PORT`: SSH port (usually 22)
-- `SSH_KEY_PATH`: Path to SSH private key for bioreactor-hub access
-- `UPLOAD_FOLDER`: Directory for temporary file uploads
-- `MAX_CONTENT_LENGTH`: Maximum file upload size in bytes
-- `SECRET_KEY`: Flask secret key for sessions
+**Volume Mounts:**
+- `./config` - Dashboard settings
+- `./uploads_tmp` - Temporary file uploads
+- `./bioreactor-node-v3/data` - Read-only access to experiment data (for dashboard CSV reading)
 
-## SSH Key Setup
-
-### 1. Generate SSH Keys
-
+#### Step 3: Access Web Interface
 ```bash
-# Generate key pair for web-server → bioreactor-hub
-ssh-keygen -t rsa -b 4096 -f web_to_hub_key -N ""
+# Open in browser
+http://localhost:8080
 
-# Generate key pair for bioreactor-hub → bioreactor-node
-ssh-keygen -t rsa -b 4096 -f hub_to_node_key -N ""
+# Or from another machine
+http://<server-ip>:8080
 ```
 
-### 2. Configure SSH Access
+---
 
-```bash
-# Copy web_to_hub_key.pub to bioreactor-hub machine
-ssh-copy-id -i web_to_hub_key.pub user@bioreactor-hub-ip
+## Docker Compose Configuration
 
-# Copy hub_to_node_key.pub to bioreactor-node machine
-ssh-copy-id -i hub_to_node_key.pub user@bioreactor-node-ip
+The provided `docker-compose.yml` orchestrates all three components:
+
+```yaml
+services:
+  web-server:
+    build: ./web-server
+    ports: ["8080:8080"]
+    environment:
+      - BIOREACTOR_HUB_API_URL=http://bioreactor-hub:8000
+      - BIOREACTOR_NODE_API_URL=http://bioreactor-node:9000
+    volumes:
+      - ./web-server/uploads_tmp:/app/uploads_tmp
+      - ./web-server/config:/app/config
+      - ./bioreactor-node-v3/data:/app/node_data:ro
+    networks:
+      - bioreactor-network
+
+  bioreactor-hub:
+    build: ./bioreactor-hub
+    ports: ["8000:8000"]
+    environment:
+      - BIOREACTOR_NODE_API_URL=http://bioreactor-node:9000
+    volumes:
+      - ./bioreactor-hub/data:/app/data
+    networks:
+      - bioreactor-network
+
+  bioreactor-node:
+    build: ./bioreactor-node-v3
+    ports: ["9000:9000"]
+    privileged: true
+    environment:
+      - HARDWARE_MODE=real
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./bioreactor-node-v3/data:/app/data
+      - /dev/gpiochip4:/dev/gpiochip4
+      - /dev/i2c-1:/dev/i2c-1
+    networks:
+      - bioreactor-network
+
+networks:
+  bioreactor-network:
+    driver: bridge
 ```
 
-### 3. Update Environment Files
+**Network Architecture:**
+- All containers share `bioreactor-network` bridge network
+- Containers can reference each other by service name
+- External access via published ports
 
-Update the SSH key paths in the environment files:
+---
 
-```bash
-# In bioreactor-hub .env
-SSH_KEY_PATH=/app/ssh_keys/hub_to_node_key
+## User Experiment Containers
 
-# In web-server .env
-SSH_KEY_PATH=/app/ssh_keys/web_to_hub_key
+User scripts run in isolated Docker containers managed by the node.
+
+### Container Specification
+- **Base Image:** `python:3.11-slim`
+- **Allowed Packages:** numpy, pandas, matplotlib, scikit-learn, requests, scipy, pillow
+- **Network:** Host mode (access to node API at `localhost:9000`)
+- **Resource Limits:** 512MB memory, 1 CPU core
+- **Volumes:**
+  - `/app/user_script.py` - User's uploaded script (read-only)
+  - `/app/output` - Output directory for CSV and logs (read-write)
+
+### Environment Variables in User Containers
+- `BIOREACTOR_NODE_API_URL`: Node API endpoint
+- `EXPERIMENT_ID`: Unique experiment identifier
+- `OUTPUT_DIR`: Output directory path (`/app/output`)
+
+### User Script Example (V3 API)
+```python
+from bioreactor_client import Bioreactor, measure_all_data, write_data_to_csv
+import time
+
+bioreactor = Bioreactor()
+max_duration = 300  # 5 minutes
+interval = 10       # Measure every 10 seconds
+
+start_time = time.time()
+next_measurement_time = start_time
+
+while True:
+    current_time = time.time()
+    elapsed = current_time - start_time
+
+    if elapsed >= max_duration:
+        break
+
+    if current_time >= next_measurement_time:
+        # Get all sensors + control states
+        data = measure_all_data(bioreactor, include_controls=True)
+        write_data_to_csv(data)
+
+        print(f"CO2: {data.get('co2_ppm')} ppm")
+        print(f"Temperature: {data.get('temperature')}°C")
+
+        next_measurement_time += interval
+
+    time.sleep(0.1)
+
+print("Experiment complete!")
 ```
+
+### V3 CSV Output Format
+```csv
+timestamp,co2_ppm,temperature,od_voltages,eyespy_voltages,stirrer_duty,peltier_duty,peltier_direction
+2026-01-25T20:35:11.103915,633.0,25.4,[0.12,0.15,0.18],[],0.0,0.0,forward
+```
+
+**Columns:**
+- `timestamp`: ISO 8601 format with microseconds
+- `co2_ppm`: CO2 concentration (ppm)
+- `temperature`: Single temperature reading (°C)
+- `od_voltages`: List of optical density voltages
+- `eyespy_voltages`: List of eyespy ADC voltages
+- `stirrer_duty`: Stirrer duty cycle (0-100%)
+- `peltier_duty`: Peltier duty cycle (0-100%)
+- `peltier_direction`: "heat", "cool", "forward", or "reverse"
+
+---
+
+## Queue System
+
+The hub manages a **FIFO queue** with experiment serialization.
+
+### Queue States
+```
+QUEUED → RUNNING → COMPLETED
+  ↓         ↓          ↓
+PAUSED   FAILED   CANCELLED
+```
+
+### Queue Limits
+- **Max experiments per user:** 5 active (queued/running)
+- **Auto-cleanup:** Experiments older than 24 hours removed
+- **Persistence:** Queue saved to `bioreactor-hub/data/experiment_queue.json`
+
+### Queue Operations
+```bash
+# View queue status
+curl http://localhost:8000/api/queue/status
+
+# Cancel experiment
+curl -X POST http://localhost:8000/api/experiments/{id}/cancel
+
+# Pause experiment
+curl -X POST http://localhost:8000/api/experiments/{id}/pause
+
+# Resume experiment
+curl -X POST http://localhost:8000/api/experiments/{id}/resume
+
+# Reorder experiment
+curl -X POST http://localhost:8000/api/experiments/{id}/reorder?new_position=0
+```
+
+---
+
+## Live Dashboard
+
+The web server provides a real-time dashboard using Server-Sent Events (SSE).
+
+### Data Sources
+- **During experiment:** Reads from experiment CSV file
+- **No experiment:** Reads directly from hardware API
+- **Display:** Shows "Data Source: CSV" or "Data Source: Hardware"
+
+### Dashboard Configuration
+Edit via web UI at `http://localhost:8080/settings`:
+- Enable/disable sensor displays (CO2, temperature, OD, etc.)
+- Adjust update interval (default: 2 seconds)
+- Configure CSV file path
+
+### Accessing Dashboard
+```bash
+# Navigate to:
+http://localhost:8080/dashboard
+
+# SSE endpoint (for custom clients):
+http://localhost:8080/api/live-data
+```
+
+---
 
 ## Testing the Deployment
 
-### 1. Test Individual Components
-
+### 1. Health Checks
 ```bash
-# Test bioreactor-node
-curl http://bioreactor-node-ip:9000/health
+# Node health
+curl http://localhost:9000/api/status
 
-# Test bioreactor-hub
-curl http://bioreactor-hub-ip:8000/health
+# Hub health
+curl http://localhost:8000/api/queue/status
 
-# Test web-server
-curl http://web-server-ip:5000/health
+# Web server (open in browser)
+http://localhost:8080
 ```
 
-### 2. Run System Tests
-
+### 2. Test Experiment Upload
 ```bash
-# Run the test script
-python test_system.py
+# Create test script
+cat > test_experiment.py << 'EOF'
+from bioreactor_client import Bioreactor, measure_all_data, write_data_to_csv
+import time
+
+bioreactor = Bioreactor()
+data = measure_all_data(bioreactor)
+write_data_to_csv(data)
+print(f"CO2: {data.get('co2_ppm')} ppm")
+EOF
+
+# Upload via web interface
+# Navigate to http://localhost:8080/upload
+# Or use API:
+curl -X POST http://localhost:8000/api/experiments/start \
+  -H "Content-Type: application/json" \
+  -H "X-Session-ID: test-user" \
+  -d '{"script_content": "'"$(cat test_experiment.py)"'"}'
 ```
 
-### 3. Test User Interface
-
-1. Open http://web-server-ip:5000 in your browser
-2. Upload a Python script
-3. Monitor the experiment
-4. Download results
-
-## Security Considerations
-
-### 1. Network Security
-
-- Use firewalls to restrict access to necessary ports only
-- Consider using VPN for remote access
-- Use HTTPS in production
-
-### 2. SSH Security
-
-- Use key-based authentication only
-- Disable password authentication
-- Use non-standard SSH ports if possible
-
-### 3. Container Security
-
-- User experiment containers run with restricted permissions
-- Only whitelisted Python packages are available
-- Containers have limited network access
-
-### 4. Data Security
-
-- Encrypt sensitive data at rest
-- Use secure file permissions
-- Regular backups of experiment data
-
-## Monitoring and Logging
-
-### 1. Container Logs
-
+### 3. Monitor Experiment
 ```bash
-# View logs for each component
-docker logs bioreactor-node
-docker logs bioreactor-hub
-docker logs bioreactor-web-server
+# Check queue status
+curl http://localhost:8000/api/queue/status
+
+# Watch logs
+docker logs -f bioreactor-node-v3
+
+# View in web UI
+http://localhost:8080/my-experiments
 ```
 
-### 2. Application Logs
+### 4. Download Results
+```bash
+# Via web UI:
+http://localhost:8080/my-experiments → Download button
 
-Logs are written to:
-- `/var/log/bioreactor-node/` (bioreactor-node)
-- `/var/log/bioreactor-hub/` (bioreactor-hub)
-- `/var/log/bioreactor-web/` (web-server)
+# Or via API:
+curl -O http://localhost:8000/api/experiments/{id}/download
+```
 
-### 3. Health Checks
-
-Each component provides health check endpoints:
-- `GET /health` - Basic health status
-- `GET /api/status` - Detailed status information
+---
 
 ## Troubleshooting
 
 ### Common Issues
 
-1. **SSH Connection Failed**
-   - Verify SSH keys are correctly configured
-   - Check network connectivity
-   - Ensure SSH service is running
-
-2. **Container Creation Failed**
-   - Check Docker daemon is running
-   - Verify sufficient disk space
-   - Check Docker socket permissions
-
-3. **Hardware Not Accessible**
-   - Verify hardware mode is set correctly
-   - Check hardware connections
-   - Review hardware initialization logs
-
-4. **Experiment Failed**
-   - Check container logs
-   - Verify script syntax
-   - Review resource limits
-
-### Debug Commands
-
+#### 1. **Node container fails to start**
 ```bash
-# Check container status
-docker ps -a
+# Check Docker daemon
+sudo systemctl status docker
 
-# View container logs
-docker logs <container-name>
+# Check Docker socket permissions
+ls -la /var/run/docker.sock
 
-# Execute commands in container
-docker exec -it <container-name> /bin/bash
+# Check GPIO/I2C device access
+ls -la /dev/gpiochip4 /dev/i2c-1
 
+# Review logs
+docker logs bioreactor-node-v3
+```
+
+#### 2. **Hub can't connect to Node**
+```bash
 # Check network connectivity
-docker network ls
-docker network inspect <network-name>
+docker network inspect bioreactor_website_bioreactor-network
+
+# Verify node is accessible
+curl http://bioreactor-node:9000/api/status
+
+# Check environment variables
+docker exec bioreactor-hub env | grep NODE
 ```
 
-## Backup and Recovery
-
-### 1. Data Backup
-
+#### 3. **Dashboard shows "Data Source: Unknown"**
 ```bash
-# Backup experiment data
-tar -czf experiment_data_backup.tar.gz /app/data
+# Check experiment is running
+curl http://localhost:8000/api/queue/status
 
-# Backup configuration files
-tar -czf config_backup.tar.gz *.env
+# Verify CSV file exists
+ls -la bioreactor-node-v3/data/experiments/{id}/output/
+
+# Check web-server logs
+docker logs bioreactor_website-web-server-1
 ```
 
-### 2. Recovery
-
+#### 4. **Hardware sensors not working**
 ```bash
-# Restore experiment data
-tar -xzf experiment_data_backup.tar.gz -C /app/
+# Check hardware configuration
+cat bioreactor-node-v3/config_hardware.py
 
-# Restore configuration
-tar -xzf config_backup.tar.gz
+# Test I2C devices
+i2cdetect -y 1
+
+# Check capabilities
+curl http://localhost:9000/api/v3/capabilities
+
+# Test specific sensor
+curl http://localhost:9000/api/v3/co2_sensor/state
 ```
+
+#### 5. **Experiment fails with exit code 1**
+```bash
+# Get experiment ID from web UI or queue
+EXPERIMENT_ID=<id>
+
+# Check container logs
+cat bioreactor-node-v3/data/experiments/$EXPERIMENT_ID/output/container_logs.txt
+
+# Check user script
+cat bioreactor-node-v3/data/experiments/$EXPERIMENT_ID/user_script.py
+
+# Verify output directory permissions
+ls -la bioreactor-node-v3/data/experiments/$EXPERIMENT_ID/
+```
+
+---
 
 ## Performance Tuning
 
-### 1. Resource Limits
-
-Adjust container resource limits based on your hardware:
-
-```bash
-# In docker-compose.yml or docker run commands
---memory=1g
---cpus=2.0
+### Resource Limits
+Adjust in `docker-compose.yml`:
+```yaml
+services:
+  bioreactor-node:
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2.0'
 ```
 
-### 2. Database Optimization
+### Experiment Container Limits
+Edit `bioreactor-node-v3/src/api/experiments.py`:
+```python
+mem_limit="1g"     # Default: 512m
+cpu_quota=200000   # Default: 100000 (1 CPU)
+```
 
-For production deployments, consider using a proper database for experiment metadata instead of file-based storage.
+---
 
-### 3. Caching
+## Security Considerations
 
-Implement caching for frequently accessed data like sensor readings and experiment status. 
+### 1. Network Security
+- Use firewalls to restrict port access
+- Consider VPN for remote access
+- Use reverse proxy with HTTPS (nginx/traefik)
+
+### 2. Container Security
+- User containers run without `--privileged` flag
+- Limited package whitelist
+- Resource limits prevent DoS
+
+### 3. Data Security
+- Queue persistence in JSON (consider encryption)
+- Experiment data readable by web-server (read-only mount)
+- Session IDs are UUID-based (not cryptographic)
+
+---
+
+## Backup and Recovery
+
+### Data Backup
+```bash
+# Backup experiment data
+tar -czf bioreactor_backup_$(date +%Y%m%d).tar.gz \
+  bioreactor-node-v3/data \
+  bioreactor-hub/data \
+  web-server/config
+
+# Automated daily backup
+0 2 * * * /home/pi/backup.sh
+```
+
+### Recovery
+```bash
+# Restore from backup
+tar -xzf bioreactor_backup_20260125.tar.gz
+
+# Restart services
+docker compose restart
+```
+
+---
+
+## Updating the System
+
+```bash
+# Pull latest code
+git pull origin main
+
+# Rebuild containers
+docker compose build
+
+# Restart with new images
+docker compose down
+docker compose up -d
+
+# Verify all services
+docker compose ps
+```
+
+---
+
+## Support and Documentation
+
+- **API Documentation:** See `/api/docs` on each component
+- **CLAUDE.md:** Development guidance for AI assistants
+- **README.md:** Project overview
+- **GitHub Issues:** Report bugs and request features

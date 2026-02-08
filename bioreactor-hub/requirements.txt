@@ -3,8 +3,12 @@ fastapi==0.104.1
 uvicorn[standard]==0.24.0
 pydantic==2.5.0
 
-# SSH communication
+# SSH communication (legacy)
 paramiko==3.3.1
+
+# HTTP communication (v3)
+requests==2.31.0
+httpx==0.25.2
 
 # Environment and configuration
 python-dotenv==1.0.0

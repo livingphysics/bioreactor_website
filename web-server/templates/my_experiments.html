@@ -45,6 +45,20 @@
         .action-links a:hover {
             text-decoration: underline;
         }
+        .btn-run-now {
+            background-color: #ff6b35;
+            color: white;
+            border: none;
+            padding: 4px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: bold;
+            margin-right: 10px;
+        }
+        .btn-run-now:hover {
+            background-color: #ff5722;
+        }
     </style>
 </head>
 <body>
@@ -108,6 +122,9 @@
                         {% endif %}
                     </td>
                     <td class="action-links">
+                        {% if exp.status in ['queued', 'paused'] %}
+                        <button class="btn-run-now" onclick="runNow('{{ exp.experiment_id }}')">Run Now</button>
+                        {% endif %}
                         <a href="/experiment/{{ exp.experiment_id }}">View Details</a>
                         {% if exp.status == 'completed' %}
                         <a href="/experiment/{{ exp.experiment_id }}/download">Download Results</a>
@@ -126,6 +143,19 @@
     </div>
 
     <script>
+        async function runNow(experimentId) {
+            if (confirm('Run this experiment immediately? This will stop any currently running experiment and move this to the front of the queue.')) {
+                const response = await fetch(`/api/experiments/${experimentId}/run-now`, {
+                    method: 'POST'
+                });
+                const result = await response.json();
+                alert(result.message);
+                if (result.success) {
+                    location.reload();
+                }
+            }
+        }
+
         // Auto-refresh every 30 seconds
         setInterval(() => {
             location.reload();

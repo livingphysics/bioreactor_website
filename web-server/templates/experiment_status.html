@@ -110,14 +110,17 @@
             {% if experiment.status == 'queued' %}
             <button class="btn-warning" onclick="pauseExperiment('{{ experiment_id }}')">Pause</button>
             <button class="btn-danger" onclick="cancelExperiment('{{ experiment_id }}')">Cancel</button>
+            {% elif experiment.status == 'running' %}
+            <button class="btn-danger" onclick="stopExperiment('{{ experiment_id }}')">Stop Experiment</button>
             {% elif experiment.status == 'paused' %}
             <button class="btn-success" onclick="resumeExperiment('{{ experiment_id }}')">Resume</button>
+            <button class="btn-danger" onclick="cancelExperiment('{{ experiment_id }}')">Cancel</button>
             {% endif %}
-            
+
             {% if experiment.status == 'completed' %}
             <a href="/experiment/{{ experiment_id }}/download" class="btn-primary">Download Results</a>
             {% endif %}
-            
+
             <a href="/my-experiments" class="btn-primary">View My Experiments</a>
             <a href="/queue" class="btn-primary">View Queue</a>
         </div>
@@ -128,6 +131,19 @@
     <script>
         async function cancelExperiment(experimentId) {
             if (confirm('Are you sure you want to cancel this experiment?')) {
+                const response = await fetch(`/api/experiments/${experimentId}/cancel`, {
+                    method: 'POST'
+                });
+                const result = await response.json();
+                alert(result.message);
+                if (result.success) {
+                    location.reload();
+                }
+            }
+        }
+
+        async function stopExperiment(experimentId) {
+            if (confirm('Are you sure you want to stop this running experiment? The container will be gracefully stopped with a 30-second timeout.')) {
                 const response = await fetch(`/api/experiments/${experimentId}/cancel`, {
                     method: 'POST'
                 });

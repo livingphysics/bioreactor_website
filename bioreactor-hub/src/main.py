@@ -10,10 +10,13 @@ from contextlib import asynccontextmanager
 from typing import Dict, Optional, Any
 
 from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import uvicorn
+import httpx
 
 from .ssh_client import BioreactorNodeClient
+from .http_client import BioreactorNodeHTTPClient
 from .queue_manager import QueueManager, ExperimentStatus
 import threading
 import time
@@ -26,7 +29,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Global instances
-node_client: Optional[BioreactorNodeClient] = None
+node_client: Optional[BioreactorNodeHTTPClient] = None
 queue_manager: Optional[QueueManager] = None
 queue_worker_thread: Optional[threading.Thread] = None
 queue_worker_stop = threading.Event()
@@ -43,50 +46,45 @@ async def lifespan(app: FastAPI):
     
     # Startup
     logger.info("Starting Bioreactor Hub...")
-    
-    # Initialize SSH client for bioreactor-node
-    node_host = os.getenv("BIOREACTOR_NODE_HOST", "localhost")
-    node_port = int(os.getenv("BIOREACTOR_NODE_PORT", "22"))
-    node_username = os.getenv("BIOREACTOR_NODE_USERNAME", "pi")
-    ssh_key_path = os.getenv("SSH_KEY_PATH")
-    
-    node_client = BioreactorNodeClient(
-        host=node_host,
-        port=node_port,
-        username=node_username,
-        key_path=ssh_key_path
-    )
-    
-    # Test SSH connection
-    if node_client.connect():
-        logger.info(f"SSH connection to bioreactor-node established")
+
+    # Initialize HTTP client for bioreactor-node v3
+    node_api_url = os.getenv("BIOREACTOR_NODE_API_URL", "http://bioreactor-node:9000")
+    logger.info(f"Connecting to bioreactor-node at {node_api_url}")
+
+    node_client = BioreactorNodeHTTPClient(node_api_url)
+
+    # Test HTTP connection
+    if node_client.test_connection():
+        logger.info("✓ HTTP connection to bioreactor-node v3 established")
     else:
-        logger.warning("Failed to establish SSH connection to bioreactor-node")
+        logger.warning("✗ Failed to connect to bioreactor-node - experiments will fail")
     
     queue_manager = QueueManager(data_dir="/app/data")
     queue_worker_stop.clear()
     queue_worker_thread = threading.Thread(target=queue_worker, daemon=True)
     queue_worker_thread.start()
-    
+
     yield
     
     # Shutdown
     logger.info("Shutting down Bioreactor Hub...")
-    if node_client:
-        node_client.disconnect()
     queue_worker_stop.set()
     if queue_worker_thread:
         queue_worker_thread.join(timeout=5)
+    logger.info("Shutdown complete")
 
 # Background worker to process the experiment queue
 def queue_worker():
     while not queue_worker_stop.is_set():
         try:
             # Only one experiment can run at a time
-            running = any(
-                exp.status == ExperimentStatus.RUNNING
-                for exp in queue_manager.experiments.values()
-            )
+            # Use queue_manager's thread-safe method to check for running experiments
+            with queue_manager.lock:
+                running = any(
+                    exp.status == ExperimentStatus.RUNNING
+                    for exp in queue_manager.experiments.values()
+                )
+
             if not running:
                 next_exp = queue_manager.get_next_experiment()
                 if next_exp:
@@ -111,7 +109,7 @@ app = FastAPI(
 )
 
 # Dependency functions
-def get_node_client() -> BioreactorNodeClient:
+def get_node_client() -> BioreactorNodeHTTPClient:
     if node_client is None:
         raise HTTPException(status_code=503, detail="Node client not available")
     return node_client
@@ -174,13 +172,27 @@ async def get_user_experiments(
 @app.post("/api/experiments/{experiment_id}/cancel")
 async def cancel_experiment(
     experiment_id: str,
-    queue: QueueManager = Depends(get_queue_manager)
+    queue: QueueManager = Depends(get_queue_manager),
+    client: BioreactorNodeHTTPClient = Depends(get_node_client)
 ):
+    # Check if experiment exists and get status
+    exp_status = queue.get_experiment_status(experiment_id)
+    if not exp_status:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+
+    # If running, stop the container on the node
+    if exp_status["status"] == "running":
+        logger.info(f"Stopping running experiment {experiment_id} on node")
+        stop_result = client.stop_experiment(experiment_id)
+        if stop_result.get("status") != "success":
+            logger.warning(f"Failed to stop container for {experiment_id}: {stop_result.get('message')}")
+
+    # Update queue status
     success = queue.cancel_experiment(experiment_id)
     if success:
         return {"success": True, "message": f"Experiment {experiment_id} cancelled."}
     else:
-        raise HTTPException(status_code=400, detail="Unable to cancel experiment (may not be queued)")
+        raise HTTPException(status_code=400, detail="Unable to cancel experiment")
 
 @app.post("/api/experiments/{experiment_id}/pause")
 async def pause_experiment(
@@ -215,6 +227,89 @@ async def reorder_experiment(
         return {"success": True, "message": f"Experiment {experiment_id} moved to position {new_position}."}
     else:
         raise HTTPException(status_code=400, detail="Unable to reorder experiment (invalid id or position)")
+
+@app.post("/api/experiments/{experiment_id}/run-now")
+async def run_experiment_now(
+    experiment_id: str,
+    queue: QueueManager = Depends(get_queue_manager),
+    client: BioreactorNodeHTTPClient = Depends(get_node_client)
+):
+    """Run experiment immediately by stopping current experiment and moving this to front of queue"""
+    # Check if experiment exists
+    exp_status = queue.get_experiment_status(experiment_id)
+    if not exp_status:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+
+    # Only works for queued or paused experiments
+    if exp_status["status"] not in ["queued", "paused"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Can only run queued or paused experiments immediately (current status: {exp_status['status']})"
+        )
+
+    # Check if there's a running experiment and stop it
+    with queue.lock:
+        running_experiments = [
+            exp_id for exp_id, exp in queue.experiments.items()
+            if exp.status == ExperimentStatus.RUNNING
+        ]
+
+    if running_experiments:
+        for running_id in running_experiments:
+            logger.info(f"Stopping running experiment {running_id} to run {experiment_id} immediately")
+            # Stop the container on the node
+            stop_result = client.stop_experiment(running_id)
+            if stop_result.get("status") != "success":
+                logger.warning(f"Failed to stop container for {running_id}: {stop_result.get('message')}")
+            # Cancel it in the queue
+            queue.cancel_experiment(running_id)
+
+    # Move target experiment to front of queue
+    success = queue.run_now(experiment_id)
+    if success:
+        return {
+            "success": True,
+            "message": f"Experiment {experiment_id} moved to front of queue and will start immediately"
+        }
+    else:
+        raise HTTPException(status_code=400, detail="Failed to move experiment to front of queue")
+
+@app.get("/api/experiments/{experiment_id}/download")
+async def download_experiment_results(
+    experiment_id: str,
+    client: BioreactorNodeHTTPClient = Depends(get_node_client),
+    queue: QueueManager = Depends(get_queue_manager)
+):
+    """Download experiment results by forwarding to node"""
+    # Check if experiment exists in queue
+    exp = queue.get_experiment_status(experiment_id)
+    if not exp:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+
+    # Forward download request to node
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as http_client:
+            response = await http_client.get(
+                f"{client.base_url}/api/experiments/{experiment_id}/download"
+            )
+
+            if response.status_code == 200:
+                # Stream the ZIP file back to the client
+                return StreamingResponse(
+                    iter([response.content]),
+                    media_type="application/zip",
+                    headers={
+                        "Content-Disposition": f"attachment; filename=experiment_{experiment_id}_results.zip"
+                    }
+                )
+            elif response.status_code == 404:
+                raise HTTPException(status_code=404, detail="Experiment results not found on node")
+            else:
+                raise HTTPException(status_code=500, detail=f"Node returned error: {response.text}")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Failed to contact node: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to download results: {str(e)}")
 
 if __name__ == "__main__":
     uvicorn.run(
