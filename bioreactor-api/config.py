@@ -12,10 +12,7 @@ from typing import Optional, Union
 BIOREACTOR_V3_PATH = Path(__file__).parent / 'bioreactor_v3' / 'src'
 sys.path.insert(0, str(BIOREACTOR_V3_PATH))
 
-from config_default import Config as DefaultConfig
-
-
-class Config(DefaultConfig):
+class Config:
     """
     Hardware configuration.
 
