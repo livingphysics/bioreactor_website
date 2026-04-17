@@ -34,8 +34,8 @@ class Config:
         'ring_light': True,
         'optical_density': True,
         'eyespy_adc': False,
-        'co2_sensor': False,
-        'o2_sensor': False,
+        'co2_sensor': True,
+        'o2_sensor': True,
         'pumps': False,
         'relays': False,
     }
