@@ -10,9 +10,11 @@ this repo is just the HTTP wrapper.
 git clone <this-repo>
 cd bioreactor_website
 git submodule update --init
+cp config.py ./bioreactor-api/bioreactor_v3/src/
 
 cd bioreactor-api
 pip install -r requirements.txt
+
 ```
 
 ## Run
