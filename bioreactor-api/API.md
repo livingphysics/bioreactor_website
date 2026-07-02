@@ -133,6 +133,22 @@ Response: `{"status": "success", "temperature": 23.5, "unit": "celsius"}`
 
 ---
 
+### Ambient Temperature
+```bash
+curl -H "Authorization: Bearer $API_KEY" https://<host>/api/ambient_temp/state
+```
+Response: `{"status": "success", "temperature": 22.4, "unit": "celsius"}`
+
+---
+
+### Peltier Current
+```bash
+curl -H "Authorization: Bearer $API_KEY" https://<host>/api/peltier_current/state
+```
+Response: `{"status": "success", "current": 1.73, "unit": "amps"}`
+
+---
+
 ### CO2
 ```bash
 curl -H "Authorization: Bearer $API_KEY" https://<host>/api/co2_sensor/state

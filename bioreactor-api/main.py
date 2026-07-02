@@ -463,7 +463,8 @@ async def temp_sensor_state(request: Request):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/ambient_temp/state", response_model=AmbientTempState)
-async def ambient_temp_state():
+@limiter.limit(RATE_LIMIT)
+async def ambient_temp_state(request: Request):
     require_component('ambient_temp')
     if simulation_mode:
         return AmbientTempState(status="success", temperature=round(22.0 + random.uniform(-1.0, 1.0), 2))
@@ -551,7 +552,8 @@ async def o2_state(request: Request):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/peltier_current/state", response_model=PeltierCurrentState)
-async def peltier_current_state():
+@limiter.limit(RATE_LIMIT)
+async def peltier_current_state(request: Request):
     require_component('peltier_current')
     if simulation_mode:
         return PeltierCurrentState(status="success", current=round(random.uniform(0.0, 6.0), 3))
