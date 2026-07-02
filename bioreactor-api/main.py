@@ -13,9 +13,13 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+
+from auth import verify_token, limiter, RATE_LIMIT
 
 # Add bioreactor_v3 parent to path so we can import bioreactor_v3.src.*
 sys.path.insert(0, str(Path(__file__).parent))
@@ -187,7 +191,12 @@ app = FastAPI(
     description="Minimal REST API for bioreactor_v3 hardware control",
     version="0.1.0",
     lifespan=lifespan,
+    dependencies=[Depends(verify_token)],
 )
+
+# Rate limiting
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -209,7 +218,8 @@ def require_component(name: str):
 # ---------------------------------------------------------------------------
 
 @app.get("/health")
-async def health():
+@limiter.limit(RATE_LIMIT)
+async def health(request: Request):
     return {
         "status": "healthy",
         "hardware_mode": "simulation" if simulation_mode else "real",
@@ -219,7 +229,8 @@ async def health():
 
 
 @app.get("/api/capabilities")
-async def capabilities():
+@limiter.limit(RATE_LIMIT)
+async def capabilities(request: Request):
     """Discover available components and their endpoint patterns."""
     caps = {}
     actuators = ['led', 'peltier_driver', 'stirrer', 'ring_light', 'pumps', 'relays']
@@ -246,7 +257,8 @@ async def capabilities():
 # ---------------------------------------------------------------------------
 
 @app.post("/api/led/control", response_model=LEDState)
-async def led_control(req: LEDControlRequest):
+@limiter.limit(RATE_LIMIT)
+async def led_control(request: Request, req: LEDControlRequest):
     require_component('led')
     if simulation_mode:
         sim_state['led_power'] = req.power
@@ -257,7 +269,8 @@ async def led_control(req: LEDControlRequest):
 
 
 @app.get("/api/led/state", response_model=LEDState)
-async def led_state():
+@limiter.limit(RATE_LIMIT)
+async def led_state(request: Request):
     require_component('led')
     if simulation_mode:
         p = sim_state['led_power']
@@ -272,7 +285,8 @@ async def led_state():
 # ---------------------------------------------------------------------------
 
 @app.post("/api/peltier_driver/control", response_model=PeltierState)
-async def peltier_control(req: PeltierControlRequest):
+@limiter.limit(RATE_LIMIT)
+async def peltier_control(request: Request, req: PeltierControlRequest):
     require_component('peltier_driver')
     if simulation_mode:
         sim_state['peltier_duty'] = req.duty_cycle
@@ -284,7 +298,8 @@ async def peltier_control(req: PeltierControlRequest):
 
 
 @app.get("/api/peltier_driver/state", response_model=PeltierState)
-async def peltier_state():
+@limiter.limit(RATE_LIMIT)
+async def peltier_state(request: Request):
     require_component('peltier_driver')
     if simulation_mode:
         d = sim_state['peltier_duty']
@@ -302,7 +317,8 @@ async def peltier_state():
 # ---------------------------------------------------------------------------
 
 @app.post("/api/stirrer/control", response_model=StirrerState)
-async def stirrer_control(req: StirrerControlRequest):
+@limiter.limit(RATE_LIMIT)
+async def stirrer_control(request: Request, req: StirrerControlRequest):
     require_component('stirrer')
     if simulation_mode:
         sim_state['stirrer_duty'] = req.duty_cycle
@@ -313,7 +329,8 @@ async def stirrer_control(req: StirrerControlRequest):
 
 
 @app.get("/api/stirrer/state", response_model=StirrerState)
-async def stirrer_state():
+@limiter.limit(RATE_LIMIT)
+async def stirrer_state(request: Request):
     require_component('stirrer')
     if simulation_mode:
         d = sim_state['stirrer_duty']
@@ -328,7 +345,8 @@ async def stirrer_state():
 # ---------------------------------------------------------------------------
 
 @app.post("/api/ring_light/control", response_model=RingLightState)
-async def ring_light_control(req: RingLightControlRequest):
+@limiter.limit(RATE_LIMIT)
+async def ring_light_control(request: Request, req: RingLightControlRequest):
     require_component('ring_light')
     if simulation_mode:
         sim_state['ring_r'] = req.red
@@ -343,7 +361,8 @@ async def ring_light_control(req: RingLightControlRequest):
 
 
 @app.get("/api/ring_light/state", response_model=RingLightState)
-async def ring_light_state():
+@limiter.limit(RATE_LIMIT)
+async def ring_light_state(request: Request):
     require_component('ring_light')
     if simulation_mode:
         r, g, b = sim_state['ring_r'], sim_state['ring_g'], sim_state['ring_b']
@@ -361,7 +380,8 @@ async def ring_light_state():
 # ---------------------------------------------------------------------------
 
 @app.post("/api/pumps/control", response_model=PumpState)
-async def pumps_control(req: PumpControlRequest):
+@limiter.limit(RATE_LIMIT)
+async def pumps_control(request: Request, req: PumpControlRequest):
     require_component('pumps')
     if simulation_mode:
         sim_state['pump_name'] = req.pump_name
@@ -373,7 +393,8 @@ async def pumps_control(req: PumpControlRequest):
 
 
 @app.get("/api/pumps/state", response_model=PumpState)
-async def pumps_state():
+@limiter.limit(RATE_LIMIT)
+async def pumps_state(request: Request):
     require_component('pumps')
     if simulation_mode:
         return PumpState(status="success", pump_name=sim_state['pump_name'], velocity=sim_state['pump_velocity'], active=sim_state['pump_velocity'] != 0)
@@ -385,7 +406,8 @@ async def pumps_state():
 # ---------------------------------------------------------------------------
 
 @app.post("/api/relays/control", response_model=RelayState)
-async def relays_control(req: RelayControlRequest):
+@limiter.limit(RATE_LIMIT)
+async def relays_control(request: Request, req: RelayControlRequest):
     require_component('relays')
     if simulation_mode:
         sim_state['relays'][req.relay_name] = req.state
@@ -400,7 +422,8 @@ async def relays_control(req: RelayControlRequest):
 
 
 @app.get("/api/relays/state", response_model=RelayState)
-async def relays_state():
+@limiter.limit(RATE_LIMIT)
+async def relays_state(request: Request):
     require_component('relays')
     if simulation_mode:
         return RelayState(status="success", states=sim_state['relays'])
@@ -413,7 +436,8 @@ async def relays_state():
 # ---------------------------------------------------------------------------
 
 @app.get("/api/temp_sensor/state", response_model=TemperatureState)
-async def temp_sensor_state():
+@limiter.limit(RATE_LIMIT)
+async def temp_sensor_state(request: Request):
     require_component('temp_sensor')
     if simulation_mode:
         return TemperatureState(status="success", temperature=round(36.5 + random.uniform(-0.5, 0.5), 2))
@@ -429,7 +453,8 @@ async def temp_sensor_state():
 # ---------------------------------------------------------------------------
 
 @app.get("/api/optical_density/state", response_model=ODState)
-async def od_state():
+@limiter.limit(RATE_LIMIT)
+async def od_state(request: Request):
     require_component('optical_density')
     if simulation_mode:
         channels = getattr(_get_config(), 'OD_ADC_CHANNELS', {'135': 'A0', 'Ref': 'A1', '90': 'A2'})
@@ -449,7 +474,8 @@ async def od_state():
 # ---------------------------------------------------------------------------
 
 @app.get("/api/eyespy_adc/state", response_model=EyespyState)
-async def eyespy_state():
+@limiter.limit(RATE_LIMIT)
+async def eyespy_state(request: Request):
     require_component('eyespy_adc')
     if simulation_mode:
         boards = getattr(_get_config(), 'EYESPY_ADC', {})
@@ -469,7 +495,8 @@ async def eyespy_state():
 # ---------------------------------------------------------------------------
 
 @app.get("/api/co2_sensor/state", response_model=CO2State)
-async def co2_state():
+@limiter.limit(RATE_LIMIT)
+async def co2_state(request: Request):
     require_component('co2_sensor')
     if simulation_mode:
         return CO2State(status="success", co2_ppm=round(400 + random.uniform(-20, 20), 1))
@@ -483,7 +510,8 @@ async def co2_state():
 # ---------------------------------------------------------------------------
 
 @app.get("/api/o2_sensor/state", response_model=O2State)
-async def o2_state():
+@limiter.limit(RATE_LIMIT)
+async def o2_state(request: Request):
     require_component('o2_sensor')
     if simulation_mode:
         return O2State(status="success", o2_percent=round(20.9 + random.uniform(-0.5, 0.5), 2))
