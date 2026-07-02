@@ -36,6 +36,8 @@ class Config:
         'eyespy_adc': False,
         'co2_sensor': True,
         'o2_sensor': True,
+        'ambient_temp': True,
+        'peltier_current': True,
         'pumps': False,
         'relays': False,
     }
@@ -88,6 +90,17 @@ class Config:
     # O2 Sensor (Atlas Scientific)
     O2_SENSOR_I2C_ADDRESS: Optional[int] = None
     O2_SENSOR_I2C_BUS: int = 1
+
+    # Ambient Temperature Sensor (NXP PCT2075, I2C) — reads in °C
+    AMBIENT_TEMP_I2C_ADDRESS: int = 0x37
+    AMBIENT_TEMP_I2C_BUS: int = 1
+
+    # Peltier Current Sensor (TI INA228 current monitor, I2C) — reads in Amps.
+    # Current is derived from the shunt voltage: I = V_shunt / INA228_SHUNT_OHMS,
+    # so INA228_SHUNT_OHMS must be CALIBRATED to your board's shunt resistor.
+    PELTIER_CURRENT_I2C_ADDRESS: int = 0x40
+    PELTIER_CURRENT_I2C_BUS: int = 1
+    INA228_SHUNT_OHMS: float = 0.015  # Adafruit INA228 breakout default; calibrate per board
 
     # Pumps (ticUSB protocol)
     PUMPS: dict[str, dict[str, Union[str, int, float]]] = {
