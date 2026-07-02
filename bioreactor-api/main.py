@@ -128,6 +128,16 @@ class O2State(BaseModel):
     o2_percent: float
     unit: str = "percent"
 
+class AmbientTempState(BaseModel):
+    status: str
+    temperature: Optional[float]
+    unit: str = "celsius"
+
+class PeltierCurrentState(BaseModel):
+    status: str
+    current: Optional[float]
+    unit: str = "amps"
+
 
 # ---------------------------------------------------------------------------
 # Simulation state (tracks what actuators are "set to" in sim mode)
@@ -234,7 +244,7 @@ async def capabilities(request: Request):
     """Discover available components and their endpoint patterns."""
     caps = {}
     actuators = ['led', 'peltier_driver', 'stirrer', 'ring_light', 'pumps', 'relays']
-    sensors = ['temp_sensor', 'optical_density', 'eyespy_adc', 'co2_sensor', 'o2_sensor']
+    sensors = ['temp_sensor', 'ambient_temp', 'optical_density', 'eyespy_adc', 'co2_sensor', 'o2_sensor', 'peltier_current']
 
     for name in actuators:
         if initialized_components.get(name):
@@ -449,6 +459,22 @@ async def temp_sensor_state(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# Ambient Temperature Sensor (PCT2075)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/ambient_temp/state", response_model=AmbientTempState)
+async def ambient_temp_state():
+    require_component('ambient_temp')
+    if simulation_mode:
+        return AmbientTempState(status="success", temperature=round(22.0 + random.uniform(-1.0, 1.0), 2))
+    from bioreactor_v3.src.io import read_ambient_temp
+    temp = read_ambient_temp(bioreactor)
+    if temp is not None and isinstance(temp, float) and math.isnan(temp):
+        temp = None
+    return AmbientTempState(status="success", temperature=temp)
+
+
+# ---------------------------------------------------------------------------
 # Optical Density
 # ---------------------------------------------------------------------------
 
@@ -518,6 +544,22 @@ async def o2_state(request: Request):
     from bioreactor_v3.src.io import read_o2
     pct = read_o2(bioreactor)
     return O2State(status="success", o2_percent=float(pct) if pct is not None else 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Peltier Current Sensor (INA228)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/peltier_current/state", response_model=PeltierCurrentState)
+async def peltier_current_state():
+    require_component('peltier_current')
+    if simulation_mode:
+        return PeltierCurrentState(status="success", current=round(random.uniform(0.0, 6.0), 3))
+    from bioreactor_v3.src.io import read_peltier_current
+    current = read_peltier_current(bioreactor)
+    if current is not None and isinstance(current, float) and math.isnan(current):
+        current = None
+    return PeltierCurrentState(status="success", current=current)
 
 
 # ---------------------------------------------------------------------------
