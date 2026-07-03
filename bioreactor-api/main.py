@@ -15,11 +15,16 @@ from typing import Optional, Dict, Any
 
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from auth import verify_token, limiter, RATE_LIMIT
+from control import heater, parse_schedule, ScheduleError
+
+# Directory where the bioreactor writes its data CSVs (run files live here).
+DATA_DIR = Path(__file__).parent / 'bioreactor_v3' / 'src' / 'bioreactor_data'
 
 # Add bioreactor_v3 parent to path so we can import bioreactor_v3.src.*
 sys.path.insert(0, str(Path(__file__).parent))
@@ -138,6 +143,13 @@ class PeltierCurrentState(BaseModel):
     current: Optional[float]
     unit: str = "amps"
 
+# -- Heater PID run
+class HeaterPIDRequest(BaseModel):
+    setpoint: float = Field(description="Target bath temperature (°C)")
+    kp: float = Field(12.0, description="Proportional gain")
+    ki: float = Field(0.015, description="Integral gain")
+    kd: float = Field(0.0, description="Derivative gain")
+
 
 # ---------------------------------------------------------------------------
 # Simulation state (tracks what actuators are "set to" in sim mode)
@@ -168,11 +180,36 @@ async def lifespan(app: FastAPI):
     if not simulation_mode:
         try:
             from bioreactor_v3.src.bioreactor import Bioreactor
+            from bioreactor_v3.src import io as bio_io
+            from bioreactor_v3.src.utils import (
+                temperature_pid_controller, measure_and_record_sensors,
+            )
             from config import Config
             config = Config()
             bioreactor = Bioreactor(config)
             initialized_components = dict(bioreactor._initialized)
             logger.info(f"Hardware initialized: {initialized_components}")
+            # The bioreactor opens a startup data file (header only). The heater
+            # engine manages its own per-run files, so release + remove the stray
+            # startup CSV now (nothing has written to it yet) so it can't linger as
+            # the "latest" download.
+            try:
+                startup_path = getattr(bioreactor, 'out_file_path', None)
+                if getattr(bioreactor, 'out_file', None) is not None:
+                    bioreactor.out_file.close()
+                bioreactor.writer = None
+                bioreactor.out_file = None
+                if startup_path and os.path.exists(startup_path):
+                    os.remove(startup_path)
+            except Exception as e:
+                logger.warning(f"Could not release startup data file: {e}")
+            heater.configure(
+                bio=bioreactor, sim=False, sim_state=None, io_module=bio_io,
+                pid_func=temperature_pid_controller, measure_func=measure_and_record_sensors,
+                data_dir=str(DATA_DIR),
+                max_heat=getattr(config, 'PELTIER_MAX_DUTY_HEAT', 70.0),
+                max_cool=getattr(config, 'PELTIER_MAX_DUTY_COOL', 100.0),
+            )
         except Exception as e:
             logger.error(f"Hardware init failed: {e}", exc_info=True)
             bioreactor = None
@@ -186,8 +223,16 @@ async def lifespan(app: FastAPI):
             if name != 'i2c' and enabled:
                 initialized_components[name] = True
 
+    if simulation_mode:
+        heater.configure(
+            bio=None, sim=True, sim_state=sim_state, io_module=None,
+            pid_func=None, measure_func=None, data_dir=str(DATA_DIR),
+            max_heat=70.0, max_cool=100.0,
+        )
+
     yield
 
+    heater.stop()
     if bioreactor:
         bioreactor.finish()
         logger.info("Hardware cleanup complete")
@@ -235,6 +280,66 @@ async def health(request: Request):
         "hardware_mode": "simulation" if simulation_mode else "real",
         "hardware_available": bioreactor is not None,
         "initialized_components": initialized_components,
+    }
+
+
+@app.get("/api/state")
+@limiter.limit(RATE_LIMIT)
+async def state(request: Request):
+    """Aggregate heater-relevant signals in one call (for the live monitor).
+
+    Returns bath temp, ambient temp, signed peltier current, peltier duty/direction,
+    and the current heater-run status. Unavailable components report null.
+    """
+    import time as _time
+
+    def _sensor(name, reader):
+        if not initialized_components.get(name, False):
+            return None
+        try:
+            v = reader()
+        except Exception as e:
+            logger.warning("state read failed for %s: %s", name, e)
+            return None
+        if v is not None and isinstance(v, float) and math.isnan(v):
+            return None
+        return v
+
+    if simulation_mode:
+        temperature = round(36.5 + random.uniform(-0.5, 0.5), 2) if initialized_components.get('temp_sensor') else None
+        ambient = round(22.0 + random.uniform(-1.0, 1.0), 2) if initialized_components.get('ambient_temp') else None
+        current = round(random.uniform(0.0, 0.05), 3) if initialized_components.get('peltier_current') else None
+        peltier = {"duty_cycle": sim_state['peltier_duty'],
+                   "direction": sim_state['peltier_direction'],
+                   "active": sim_state['peltier_duty'] > 0} if initialized_components.get('peltier_driver') else None
+    else:
+        from bioreactor_v3.src.io import (
+            get_temperature, read_ambient_temp, read_peltier_current, get_peltier_state,
+        )
+        temperature = _sensor('temp_sensor', lambda: get_temperature(bioreactor, sensor_index=0))
+        ambient = _sensor('ambient_temp', lambda: read_ambient_temp(bioreactor))
+        current = _sensor('peltier_current', lambda: read_peltier_current(bioreactor))
+        peltier = None
+        forward = True
+        if initialized_components.get('peltier_driver'):
+            ps = get_peltier_state(bioreactor)
+            if ps is not None:
+                duty, forward = ps
+                peltier = {"duty_cycle": duty,
+                           "direction": "cool" if forward else "heat",
+                           "active": duty > 0}
+        # INA228 reads unsigned; sign negative when heating (forward False), per GUI convention
+        if current is not None and not forward:
+            current = -current
+
+    return {
+        "status": "success",
+        "timestamp": _time.time(),
+        "temperature": temperature,
+        "ambient_temp": ambient,
+        "peltier_current": current,
+        "peltier": peltier,
+        "heater": heater.status(),
     }
 
 
@@ -298,6 +403,9 @@ async def led_state(request: Request):
 @limiter.limit(RATE_LIMIT)
 async def peltier_control(request: Request, req: PeltierControlRequest):
     require_component('peltier_driver')
+    if heater.active:
+        raise HTTPException(status_code=409,
+                            detail="a heater run (schedule/PID) is active; stop it before manual control")
     if simulation_mode:
         sim_state['peltier_duty'] = req.duty_cycle
         sim_state['peltier_direction'] = req.direction
@@ -562,6 +670,108 @@ async def peltier_current_state(request: Request):
     if current is not None and isinstance(current, float) and math.isnan(current):
         current = None
     return PeltierCurrentState(status="success", current=current)
+
+
+# ---------------------------------------------------------------------------
+# Heater control engine (schedule + PID) — runs on the Pi, next to the hardware
+# ---------------------------------------------------------------------------
+
+@app.post("/api/heater/schedule")
+@limiter.limit(RATE_LIMIT)
+async def heater_schedule(request: Request):
+    """Upload a peltier schedule CSV (duty,direction,hold_s) and start running it.
+
+    Body is the raw CSV text (Content-Type text/plain or text/csv). Same format
+    as heater_gui / peltier_schedule_example.csv.
+    """
+    require_component('peltier_driver')
+    raw = await request.body()
+    try:
+        text = raw.decode('utf-8')
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="schedule body must be UTF-8 text")
+    try:
+        steps = parse_schedule(text, max_heat=heater.max_heat, max_cool=heater.max_cool)
+    except ScheduleError as e:
+        raise HTTPException(status_code=400, detail=f"invalid schedule: {e}")
+    try:
+        heater.start_schedule(steps)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    total_hold = round(sum(s['hold_s'] for s in steps), 1)
+    return {"status": "success", "mode": "schedule",
+            "total_steps": len(steps), "total_duration_s": total_hold,
+            **heater.status()}
+
+
+@app.post("/api/heater/pid")
+@limiter.limit(RATE_LIMIT)
+async def heater_pid(request: Request, req: HeaterPIDRequest):
+    """Start a PID run that holds the bath at `setpoint` °C (heater_gui PID mode)."""
+    require_component('peltier_driver')
+    if not simulation_mode:
+        require_component('temp_sensor')
+    try:
+        heater.start_pid(req.setpoint, req.kp, req.ki, req.kd)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"status": "success", "mode": "pid", **heater.status()}
+
+
+@app.post("/api/heater/stop")
+@limiter.limit(RATE_LIMIT)
+async def heater_stop(request: Request):
+    """Stop any active schedule/PID run and turn the peltier off."""
+    status = heater.stop(reason="stopped via API")
+    return {"status": "success", **status}
+
+
+@app.get("/api/heater/status")
+@limiter.limit(RATE_LIMIT)
+async def heater_status(request: Request):
+    """Current heater-run state (mode, step/progress, last sample, abort reason)."""
+    return heater.status()
+
+
+# ---------------------------------------------------------------------------
+# Data files (download the most recent bioreactor run CSV)
+# ---------------------------------------------------------------------------
+
+def _list_data_files():
+    """Return run CSVs under DATA_DIR (recursive), newest first, with metadata."""
+    files = []
+    if DATA_DIR.is_dir():
+        for p in DATA_DIR.rglob('*.csv'):
+            try:
+                stat = p.stat()
+            except OSError:
+                continue
+            files.append((p, stat.st_mtime, stat.st_size))
+    files.sort(key=lambda t: t[1], reverse=True)
+    return files
+
+
+@app.get("/api/data/list")
+@limiter.limit(RATE_LIMIT)
+async def data_list(request: Request):
+    """List available data CSVs (newest first)."""
+    return {"status": "success", "files": [
+        {"name": p.relative_to(DATA_DIR).as_posix(),
+         "size_bytes": size,
+         "modified": mtime}
+        for p, mtime, size in _list_data_files()
+    ]}
+
+
+@app.get("/api/data/latest")
+@limiter.limit(RATE_LIMIT)
+async def data_latest(request: Request):
+    """Download the most recently modified data CSV."""
+    files = _list_data_files()
+    if not files:
+        raise HTTPException(status_code=404, detail="no data files found")
+    path = files[0][0]
+    return FileResponse(str(path), media_type='text/csv', filename=path.name)
 
 
 # ---------------------------------------------------------------------------

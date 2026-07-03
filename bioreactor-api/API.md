@@ -21,6 +21,15 @@ curl -H "Authorization: Bearer $API_KEY" https://<host>/health
 curl -H "Authorization: Bearer $API_KEY" https://<host>/api/capabilities
 ```
 
+### Aggregate State (for the live monitor)
+One call returns bath temp, ambient temp, signed peltier current, peltier
+duty/direction, and heater-run status — poll this at ~1 Hz instead of hitting
+each sensor endpoint separately.
+```bash
+curl -H "Authorization: Bearer $API_KEY" https://<host>/api/state
+```
+Response: `{"status": "success", "temperature": 24.2, "ambient_temp": 24.4, "peltier_current": 0.02, "peltier": {"duty_cycle": 0, "direction": "cool", "active": false}, "heater": {...}}`
+
 ---
 
 ## Actuators
@@ -181,12 +190,62 @@ Response: `{"status": "success", "voltages": [2.1, 1.8], "unit": "volts"}`
 
 ---
 
+## Heater Control (schedule / PID)
+
+The control loop runs on the Pi with safety cutoffs (peltier off if the bath
+temperature reads NaN for 15 samples or leaves the 2–60 °C window). While a run
+is active, manual `POST /api/peltier_driver/control` returns `409`.
+
+**Upload + run a schedule** (CSV body, `duty,direction,hold_s`, same format as heater_gui):
+```bash
+curl -X POST -H "Authorization: Bearer $API_KEY" -H "Content-Type: text/csv" \
+  --data-binary $'duty,direction,hold_s\n50,cool,120\n0,heat,30\n70,heat,60\n' \
+  https://<host>/api/heater/schedule
+```
+
+**Run a PID setpoint:**
+```bash
+curl -X POST -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  -d '{"setpoint": 37.0, "kp": 12.0, "ki": 0.015, "kd": 0.0}' \
+  https://<host>/api/heater/pid
+```
+
+**Status of the current run:**
+```bash
+curl -H "Authorization: Bearer $API_KEY" https://<host>/api/heater/status
+```
+Response: `{"active": true, "mode": "schedule", "step": 2, "total_steps": 3, "last": {"temperature": 24.2, "ambient_temp": 24.4, "peltier_current": -0.36, ...}, ...}`
+
+**Stop any active run (peltier off):**
+```bash
+curl -X POST -H "Authorization: Bearer $API_KEY" https://<host>/api/heater/stop
+```
+
+---
+
+## Data Files
+
+**Download the most recent run CSV:**
+```bash
+curl -H "Authorization: Bearer $API_KEY" -OJ https://<host>/api/data/latest
+```
+
+**List available data files (newest first):**
+```bash
+curl -H "Authorization: Bearer $API_KEY" https://<host>/api/data/list
+```
+
+---
+
 ## Error Codes
 
 | Code | Meaning |
 |------|---------|
 | 200 | Success |
+| 400 | Malformed schedule / body |
 | 401 | Missing authorization header |
 | 403 | Invalid API key |
+| 404 | No data file found |
+| 409 | Manual control blocked (a heater run is active) / run already active |
 | 429 | Rate limit exceeded (100 req/min) |
 | 503 | Component not available |
