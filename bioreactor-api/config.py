@@ -59,6 +59,17 @@ class Config:
     DATA_RETENTION_KEEP: int = 10       # always keep at least this many newest runs
     DATA_MIN_FREE_MB: int = 500         # refuse to start a run if free disk below this
 
+    # Pi camera (rpicam-still snapshots via GET /api/camera/snapshot).
+    # rotation/hflip/vflip/zoom are defaults; requests can override via query params.
+    CAMERA_ENABLED: bool = True
+    CAMERA_WIDTH: int = 1280
+    CAMERA_HEIGHT: int = 720
+    CAMERA_ROTATION: int = 0     # 0 or 180
+    CAMERA_HFLIP: bool = False
+    CAMERA_VFLIP: bool = False
+    CAMERA_ZOOM: float = 1.0     # 1.0 = full frame; 2.0 = 2x centered digital zoom
+    CAMERA_QUALITY: int = 90
+
     # Stirrer (PWM only)
     STIRRER_PWM_PIN: int = 12
     STIRRER_PWM_FREQ: int = 1000

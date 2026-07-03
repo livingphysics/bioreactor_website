@@ -15,11 +15,13 @@ from typing import Optional, Dict, Any
 
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
+import camera
 from auth import verify_token, limiter, RATE_LIMIT
 from control import heater, parse_schedule, ScheduleError, HARDWARE_LOCK, InsufficientStorageError
 
@@ -783,6 +785,45 @@ async def data_latest(request: Request):
         raise HTTPException(status_code=404, detail="no data files found")
     path = files[0][0]
     return FileResponse(str(path), media_type='text/csv', filename=path.name)
+
+
+# ---------------------------------------------------------------------------
+# Camera (Pi camera snapshot via rpicam-still)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/camera/snapshot")
+@limiter.limit(RATE_LIMIT)
+async def camera_snapshot(request: Request,
+                          rotation: Optional[int] = None,
+                          hflip: Optional[bool] = None,
+                          vflip: Optional[bool] = None,
+                          zoom: Optional[float] = None):
+    """Return a single JPEG frame from the Pi camera.
+
+    Optional query params override the configured defaults:
+    rotation (0|180), hflip (bool), vflip (bool), zoom (>=1.0, centered digital zoom).
+    """
+    config = _get_config()
+    if not getattr(config, 'CAMERA_ENABLED', True) or not camera.available():
+        raise HTTPException(status_code=503, detail="camera not available")
+    rot = int(rotation) if rotation is not None else int(getattr(config, 'CAMERA_ROTATION', 0))
+    if rot not in (0, 180):
+        raise HTTPException(status_code=400, detail="rotation must be 0 or 180")
+    try:
+        jpeg = await run_in_threadpool(
+            camera.capture_jpeg,
+            width=getattr(config, 'CAMERA_WIDTH', 1280),
+            height=getattr(config, 'CAMERA_HEIGHT', 720),
+            rotation=rot,
+            hflip=(bool(getattr(config, 'CAMERA_HFLIP', False)) if hflip is None else hflip),
+            vflip=(bool(getattr(config, 'CAMERA_VFLIP', False)) if vflip is None else vflip),
+            zoom=(float(getattr(config, 'CAMERA_ZOOM', 1.0)) if zoom is None else zoom),
+            quality=getattr(config, 'CAMERA_QUALITY', 90),
+        )
+    except camera.CameraError as e:
+        raise HTTPException(status_code=503, detail=f"camera: {e}")
+    return Response(content=jpeg, media_type="image/jpeg",
+                    headers={"Cache-Control": "no-store"})
 
 
 # ---------------------------------------------------------------------------
