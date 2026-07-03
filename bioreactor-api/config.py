@@ -51,6 +51,14 @@ class Config:
     # heat/cool (and PID/schedules) physically correct for everyone.
     PELTIER_DIR_INVERTED: bool = True
 
+    # Data retention for API-generated run CSVs in bioreactor_v3/src/bioreactor_data/.
+    # Old run files are pruned (oldest first) on startup and before each run so the
+    # SD card can't fill up; runs are refused if free space drops below the floor.
+    # Only touches files this API creates (*_peltier_schedule.csv / *_pid_run.csv).
+    DATA_RETENTION_MAX_MB: int = 1000   # cap total size of API run files
+    DATA_RETENTION_KEEP: int = 10       # always keep at least this many newest runs
+    DATA_MIN_FREE_MB: int = 500         # refuse to start a run if free disk below this
+
     # Stirrer (PWM only)
     STIRRER_PWM_PIN: int = 12
     STIRRER_PWM_FREQ: int = 1000
