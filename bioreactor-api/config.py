@@ -46,6 +46,10 @@ class Config:
     PELTIER_PWM_PIN: int = 21
     PELTIER_DIR_PIN: int = 20
     PELTIER_PWM_FREQ: int = 1000
+    # This rig's peltier is wired opposite the driver convention: verified 2026-07-03
+    # that 'heat' at 70% cooled the bath ~1.9 °C in 75s. Inverting the DIR pin makes
+    # heat/cool (and PID/schedules) physically correct for everyone.
+    PELTIER_DIR_INVERTED: bool = True
 
     # Stirrer (PWM only)
     STIRRER_PWM_PIN: int = 12
