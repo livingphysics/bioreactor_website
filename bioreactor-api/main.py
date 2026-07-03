@@ -21,7 +21,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from auth import verify_token, limiter, RATE_LIMIT
-from control import heater, parse_schedule, ScheduleError, HARDWARE_LOCK
+from control import heater, parse_schedule, ScheduleError, HARDWARE_LOCK, InsufficientStorageError
 
 # Directory where the bioreactor writes its data CSVs (run files live here).
 DATA_DIR = Path(__file__).parent / 'bioreactor_v3' / 'src' / 'bioreactor_data'
@@ -209,7 +209,11 @@ async def lifespan(app: FastAPI):
                 data_dir=str(DATA_DIR),
                 max_heat=getattr(config, 'PELTIER_MAX_DUTY_HEAT', 70.0),
                 max_cool=getattr(config, 'PELTIER_MAX_DUTY_COOL', 100.0),
+                retention_max_mb=getattr(config, 'DATA_RETENTION_MAX_MB', 1000),
+                retention_keep=getattr(config, 'DATA_RETENTION_KEEP', 10),
+                min_free_mb=getattr(config, 'DATA_MIN_FREE_MB', 500),
             )
+            heater.prune()  # trim old run files on startup
         except Exception as e:
             logger.error(f"Hardware init failed: {e}", exc_info=True)
             bioreactor = None
@@ -699,6 +703,8 @@ async def heater_schedule(request: Request):
         raise HTTPException(status_code=400, detail=f"invalid schedule: {e}")
     try:
         heater.start_schedule(steps)
+    except InsufficientStorageError as e:
+        raise HTTPException(status_code=507, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
     total_hold = round(sum(s['hold_s'] for s in steps), 1)
@@ -716,6 +722,8 @@ async def heater_pid(request: Request, req: HeaterPIDRequest):
         require_component('temp_sensor')
     try:
         heater.start_pid(req.setpoint, req.kp, req.ki, req.kd)
+    except InsufficientStorageError as e:
+        raise HTTPException(status_code=507, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
     return {"status": "success", "mode": "pid", **heater.status()}

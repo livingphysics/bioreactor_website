@@ -19,6 +19,7 @@ developed without a Pi. No data file is written in simulation.
 import os
 import csv
 import time
+import shutil
 import random
 import logging
 import threading
@@ -38,6 +39,66 @@ SAMPLE_PERIOD_S = 1.0
 # coordination. Re-entrant so a single tick can nest peltier + sensor calls.
 # main.py acquires this around its hardware reads/writes too.
 HARDWARE_LOCK = threading.RLock()
+
+
+# --- Data-file retention + disk guard --------------------------------------
+# Retention only ever touches files THIS engine creates (these suffixes) at the
+# top level of the data dir — never the historical/committed data, the
+# bioreactor's own files, or subdirectories.
+RUN_FILE_SUFFIXES = ('_peltier_schedule.csv', '_pid_run.csv')
+
+
+class InsufficientStorageError(Exception):
+    """Raised when there isn't enough free disk to safely start a run."""
+
+
+def prune_run_files(data_dir, max_total_mb, keep):
+    """Delete oldest API-generated run CSVs so their combined size stays under
+    ``max_total_mb``, always keeping at least ``keep`` of the most recent.
+
+    Scope is strictly top-level files ending in RUN_FILE_SUFFIXES. Returns the
+    list of removed paths.
+    """
+    if not data_dir or not os.path.isdir(data_dir):
+        return []
+    entries = []
+    for name in os.listdir(data_dir):
+        if not name.endswith(RUN_FILE_SUFFIXES):
+            continue
+        p = os.path.join(data_dir, name)
+        try:
+            if os.path.isfile(p):
+                entries.append((p, os.path.getmtime(p), os.path.getsize(p)))
+        except OSError:
+            continue
+    entries.sort(key=lambda t: t[1], reverse=True)   # newest first
+    max_bytes = max(0, max_total_mb) * 1024 * 1024
+    # Always keep at least the single newest run file, even if it alone exceeds the
+    # cap — never delete the most recent run to satisfy a size budget.
+    keep = max(1, keep)
+    total = 0
+    cutoff = len(entries)          # index of the first file to delete (keep [:cutoff])
+    for i, (_p, _m, size) in enumerate(entries):
+        total += size
+        if i >= keep and total > max_bytes:
+            cutoff = i
+            break
+    removed = []
+    for p, _m, _s in entries[cutoff:]:
+        try:
+            os.remove(p)
+            removed.append(p)
+        except OSError as e:
+            logger.warning("could not prune %s: %s", p, e)
+    return removed
+
+
+def _free_mb(path):
+    """Free megabytes on the filesystem holding ``path``, or None if unknown."""
+    try:
+        return shutil.disk_usage(path).free / (1024 * 1024)
+    except OSError:
+        return None
 
 
 class ScheduleError(ValueError):
@@ -108,12 +169,16 @@ class HeaterController:
         self._data_dir: Optional[str] = None
         self._max_heat = 70.0
         self._max_cool = 100.0
+        self._retention_max_mb = 1000    # cap total size of API run files
+        self._retention_keep = 10        # always keep at least this many newest runs
+        self._min_free_mb = 500          # refuse to start a run below this free space
 
         self._reset_state()
 
     # ------------------------------------------------------------------ setup
     def configure(self, *, bio, sim, sim_state, io_module, pid_func, measure_func,
-                  data_dir, max_heat, max_cool):
+                  data_dir, max_heat, max_cool,
+                  retention_max_mb=1000, retention_keep=10, min_free_mb=500):
         with self._lock:
             self._bio = bio
             self._sim = sim
@@ -124,6 +189,46 @@ class HeaterController:
             self._data_dir = data_dir
             self._max_heat = max_heat
             self._max_cool = max_cool
+            self._retention_max_mb = retention_max_mb
+            self._retention_keep = retention_keep
+            self._min_free_mb = min_free_mb
+
+    def prune(self):
+        """Prune old run files now (e.g. on startup). No-op in simulation."""
+        if self._sim or not self._data_dir:
+            return
+        try:
+            removed = prune_run_files(self._data_dir, self._retention_max_mb, self._retention_keep)
+            if removed:
+                logger.info("Startup: pruned %d old run file(s)", len(removed))
+        except Exception as e:
+            logger.warning("Startup pruning failed: %s", e)
+
+    def _prepare_storage(self):
+        """Free space + verify headroom before a run. Real mode only.
+
+        Prunes old run files, then raises InsufficientStorageError if free disk
+        is still below the configured floor. Called before the run is marked
+        active, so a full disk cleanly refuses the run instead of half-starting.
+        """
+        if self._sim or not self._data_dir:
+            return
+        try:
+            os.makedirs(self._data_dir, exist_ok=True)
+        except OSError:
+            pass
+        try:
+            removed = prune_run_files(self._data_dir, self._retention_max_mb, self._retention_keep)
+            if removed:
+                logger.info("Pruned %d old run file(s) to stay under %d MB",
+                            len(removed), self._retention_max_mb)
+        except Exception as e:
+            logger.warning("Run-file pruning failed: %s", e)
+        free = _free_mb(self._data_dir)
+        if free is not None and free < self._min_free_mb:
+            raise InsufficientStorageError(
+                f"only {free:.0f} MB free at the data directory; "
+                f"need at least {self._min_free_mb} MB to start a run")
 
     @property
     def max_heat(self) -> float:
@@ -156,6 +261,9 @@ class HeaterController:
             with self._lock:
                 if self.active:
                     raise RuntimeError("a heater run is already active")
+            # prune + disk guard before marking active (may raise InsufficientStorageError)
+            self._prepare_storage()
+            with self._lock:
                 self._reset_state()
                 self.mode = 'schedule'
                 self.steps = steps
@@ -168,6 +276,8 @@ class HeaterController:
             with self._lock:
                 if self.active:
                     raise RuntimeError("a heater run is already active")
+            self._prepare_storage()
+            with self._lock:
                 self._reset_state()
                 self.mode = 'pid'
                 self.setpoint = float(setpoint)
@@ -182,14 +292,16 @@ class HeaterController:
 
     def _begin(self):
         """Start the loop. Caller must hold the lock."""
+        # Open the data file first: if it fails (e.g. disk full), we haven't yet
+        # marked the run active, so the controller isn't left wedged.
+        if not self._sim:
+            self._open_data_file()
         self.active = True
         self.run_t0 = time.time()
         self.nan_count = 0
         self.completed = False
         self.aborted = False
         self.abort_reason = None
-        if not self._sim:
-            self._open_data_file()
         self._stop_evt.clear()
         self._thread = threading.Thread(target=self._run, daemon=True, name="heater-control")
         self._thread.start()
@@ -372,6 +484,14 @@ class HeaterController:
             if temp > TEMP_MAX_C or temp < TEMP_MIN_C:
                 self._finish(completed=False,
                              abort=f"bath {temp:.1f} °C outside [{TEMP_MIN_C:.0f}, {TEMP_MAX_C:.0f}] °C")
+
+        # Fail safe on low disk. The CSV recorder swallows write errors, so a full
+        # disk won't surface as NaN/out-of-window temps — check free space directly
+        # each tick and abort (peltier off) if it falls below the run floor.
+        if self.active:
+            free = _free_mb(self._data_dir)
+            if free is not None and free < self._min_free_mb:
+                self._finish(completed=False, abort=f"low disk space ({free:.0f} MB free)")
 
     def _finish(self, completed: bool, abort: Optional[str] = None):
         """End the run from inside the control thread. Caller holds the lock."""
