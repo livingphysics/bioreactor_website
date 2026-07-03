@@ -21,7 +21,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from auth import verify_token, limiter, RATE_LIMIT
-from control import heater, parse_schedule, ScheduleError
+from control import heater, parse_schedule, ScheduleError, HARDWARE_LOCK
 
 # Directory where the bioreactor writes its data CSVs (run files live here).
 DATA_DIR = Path(__file__).parent / 'bioreactor_v3' / 'src' / 'bioreactor_data'
@@ -316,18 +316,20 @@ async def state(request: Request):
         from bioreactor_v3.src.io import (
             get_temperature, read_ambient_temp, read_peltier_current, get_peltier_state,
         )
-        temperature = _sensor('temp_sensor', lambda: get_temperature(bioreactor, sensor_index=0))
-        ambient = _sensor('ambient_temp', lambda: read_ambient_temp(bioreactor))
-        current = _sensor('peltier_current', lambda: read_peltier_current(bioreactor))
-        peltier = None
-        forward = True
-        if initialized_components.get('peltier_driver'):
-            ps = get_peltier_state(bioreactor)
-            if ps is not None:
-                duty, forward = ps
-                peltier = {"duty_cycle": duty,
-                           "direction": "cool" if forward else "heat",
-                           "active": duty > 0}
+        # Serialize bus access against the heater control loop (see control.HARDWARE_LOCK).
+        with HARDWARE_LOCK:
+            temperature = _sensor('temp_sensor', lambda: get_temperature(bioreactor, sensor_index=0))
+            ambient = _sensor('ambient_temp', lambda: read_ambient_temp(bioreactor))
+            current = _sensor('peltier_current', lambda: read_peltier_current(bioreactor))
+            peltier = None
+            forward = True
+            if initialized_components.get('peltier_driver'):
+                ps = get_peltier_state(bioreactor)
+                if ps is not None:
+                    duty, forward = ps
+                    peltier = {"duty_cycle": duty,
+                               "direction": "cool" if forward else "heat",
+                               "active": duty > 0}
         # INA228 reads unsigned; sign negative when heating (forward False), per GUI convention
         if current is not None and not forward:
             current = -current
@@ -411,7 +413,8 @@ async def peltier_control(request: Request, req: PeltierControlRequest):
         sim_state['peltier_direction'] = req.direction
         return PeltierState(status="success", duty_cycle=req.duty_cycle, direction=req.direction, active=req.duty_cycle > 0)
     from bioreactor_v3.src.io import set_peltier_power
-    set_peltier_power(bioreactor, req.duty_cycle, req.direction)
+    with HARDWARE_LOCK:
+        set_peltier_power(bioreactor, req.duty_cycle, req.direction)
     return PeltierState(status="success", duty_cycle=req.duty_cycle, direction=req.direction, active=req.duty_cycle > 0)
 
 

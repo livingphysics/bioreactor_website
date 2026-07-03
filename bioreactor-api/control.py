@@ -33,6 +33,12 @@ TEMP_MIN_C = 2.0
 MAX_NAN_SAMPLES = 15
 SAMPLE_PERIOD_S = 1.0
 
+# Serializes all bioreactor hardware access (I2C / GPIO) between the control-loop
+# thread and FastAPI request threads, which otherwise hit the same bus with no
+# coordination. Re-entrant so a single tick can nest peltier + sensor calls.
+# main.py acquires this around its hardware reads/writes too.
+HARDWARE_LOCK = threading.RLock()
+
 
 class ScheduleError(ValueError):
     """Raised when an uploaded schedule fails to parse or validate."""
@@ -87,7 +93,8 @@ class HeaterController:
     """
 
     def __init__(self):
-        self._lock = threading.RLock()
+        self._lock = threading.RLock()          # guards run state
+        self._lifecycle = threading.Lock()      # serializes start/stop transitions
         self._thread: Optional[threading.Thread] = None
         self._stop_evt = threading.Event()
 
@@ -140,35 +147,38 @@ class HeaterController:
         self.aborted = False
         self.abort_reason: Optional[str] = None
         self.nan_count = 0
+        self.tick_errors = 0
         self.last: Dict[str, Any] = {}
 
     # ---------------------------------------------------------------- control
     def start_schedule(self, steps: List[Dict[str, Any]]):
-        with self._lock:
-            if self.active:
-                raise RuntimeError("a heater run is already active")
-            self._reset_state()
-            self.mode = 'schedule'
-            self.steps = steps
-            self.step_idx = -1
-            self.seg_end = None
-            self._begin()
+        with self._lifecycle:
+            with self._lock:
+                if self.active:
+                    raise RuntimeError("a heater run is already active")
+                self._reset_state()
+                self.mode = 'schedule'
+                self.steps = steps
+                self.step_idx = -1
+                self.seg_end = None
+                self._begin()
 
     def start_pid(self, setpoint: float, kp: float, ki: float, kd: float):
-        with self._lock:
-            if self.active:
-                raise RuntimeError("a heater run is already active")
-            self._reset_state()
-            self.mode = 'pid'
-            self.setpoint = float(setpoint)
-            self.gains = {'kp': float(kp), 'ki': float(ki), 'kd': float(kd)}
-            # Clear any PID integrator state left on the bioreactor from a prior run.
-            if self._bio is not None:
-                for attr in ('_temp_integral', '_temp_last_error',
-                             '_temp_last_time', '_temp_last_derivative'):
-                    if hasattr(self._bio, attr):
-                        delattr(self._bio, attr)
-            self._begin()
+        with self._lifecycle:
+            with self._lock:
+                if self.active:
+                    raise RuntimeError("a heater run is already active")
+                self._reset_state()
+                self.mode = 'pid'
+                self.setpoint = float(setpoint)
+                self.gains = {'kp': float(kp), 'ki': float(ki), 'kd': float(kd)}
+                # Clear any PID integrator state left on the bioreactor from a prior run.
+                if self._bio is not None:
+                    for attr in ('_temp_integral', '_temp_last_error',
+                                 '_temp_last_time', '_temp_last_derivative'):
+                        if hasattr(self._bio, attr):
+                            delattr(self._bio, attr)
+                self._begin()
 
     def _begin(self):
         """Start the loop. Caller must hold the lock."""
@@ -186,21 +196,28 @@ class HeaterController:
         logger.info("Heater run started: mode=%s", self.mode)
 
     def stop(self, reason: Optional[str] = None) -> dict:
-        """Stop any active run and turn the peltier off. Safe to call when idle."""
-        with self._lock:
-            was_active = self.active
-            self.active = False
-            if reason and was_active:
-                self.abort_reason = reason
-            thread = self._thread
-        self._stop_evt.set()
-        if thread and thread.is_alive() and threading.current_thread() is not thread:
-            thread.join(timeout=3.0)
-        self._all_off()
-        if not self._sim:
-            self._close_data_file()
-        if was_active:
-            logger.info("Heater run stopped%s", f" ({reason})" if reason else "")
+        """Stop any active run and turn the peltier off. Safe to call when idle.
+
+        Held under _lifecycle for the whole teardown (including the thread join)
+        so a concurrent start_* cannot open a new run/data-file underneath it.
+        The join is outside _lock, so it can't deadlock with the control thread's
+        own _lock acquisition in _tick.
+        """
+        with self._lifecycle:
+            with self._lock:
+                was_active = self.active
+                self.active = False
+                if reason and was_active:
+                    self.abort_reason = reason
+                thread = self._thread
+            self._stop_evt.set()
+            if thread and thread.is_alive() and threading.current_thread() is not thread:
+                thread.join(timeout=3.0)
+            self._all_off()
+            if not self._sim:
+                self._close_data_file()
+            if was_active:
+                logger.info("Heater run stopped%s", f" ({reason})" if reason else "")
         return self.status()
 
     # ---------------------------------------------------------------- data IO
@@ -237,10 +254,11 @@ class HeaterController:
             self._sim_state['peltier_duty'] = duty
             self._sim_state['peltier_direction'] = direction
             return
-        if duty <= 0:
-            self._io.stop_peltier(self._bio)
-        else:
-            self._io.set_peltier_power(self._bio, duty, forward=direction)
+        with HARDWARE_LOCK:
+            if duty <= 0:
+                self._io.stop_peltier(self._bio)
+            else:
+                self._io.set_peltier_power(self._bio, duty, forward=direction)
 
     def _all_off(self):
         try:
@@ -248,7 +266,8 @@ class HeaterController:
                 if self._sim_state is not None:
                     self._sim_state['peltier_duty'] = 0.0
             elif self._io is not None and self._bio is not None:
-                self._io.stop_peltier(self._bio)
+                with HARDWARE_LOCK:
+                    self._io.stop_peltier(self._bio)
         except Exception as e:
             logger.error("Failed to stop peltier: %s", e)
 
@@ -258,8 +277,18 @@ class HeaterController:
             tick_start = time.time()
             try:
                 self._tick()
+                self.tick_errors = 0
             except Exception as e:
+                # Fail safe: an unexpected error must not leave the peltier driven.
+                # Cut power immediately, and abort the run if errors persist so a
+                # wedged bus can't hold the heater on while the loop retries.
                 logger.error("Heater control tick error: %s", e, exc_info=True)
+                self._all_off()
+                self.tick_errors += 1
+                if self.tick_errors >= MAX_NAN_SAMPLES:
+                    with self._lock:
+                        self._finish(completed=False,
+                                     abort=f"{self.tick_errors} consecutive control-loop errors")
             if not self.active:
                 break
             self._stop_evt.wait(max(0.0, SAMPLE_PERIOD_S - (time.time() - tick_start)))
@@ -272,9 +301,18 @@ class HeaterController:
                 self._advance_schedule()
                 if not self.active:   # schedule just completed
                     return
+                self._sample_and_supervise()
             elif self.mode == 'pid':
-                self._pid_step()
-            self._sample_and_supervise()
+                # One temperature read per tick: _sample_and_supervise reads + runs
+                # the safety window/NaN checks, then (if still active) the PID drives
+                # the peltier from that SAME reading — never a second, independent read
+                # that the supervisor didn't see.
+                self._sample_and_supervise()
+                if self.active and not self._sim:
+                    temp = self.last.get('temperature')
+                    with HARDWARE_LOCK:
+                        self._pid(self._bio, setpoint=self.setpoint,
+                                  current_temp=temp, **self.gains)
 
     def _advance_schedule(self):
         now = time.time()
@@ -287,11 +325,6 @@ class HeaterController:
         step = self.steps[self.step_idx]
         self._apply_peltier(step['duty'], step['direction'])
         self.seg_end = now + step['hold_s']
-
-    def _pid_step(self):
-        if self._sim:
-            return  # no thermal model in simulation
-        self._pid(self._bio, setpoint=self.setpoint, **self.gains)
 
     def _sample_and_supervise(self):
         if self._sim:
@@ -308,7 +341,8 @@ class HeaterController:
 
         elapsed = time.time() - self.run_t0
         try:
-            data = self._measure(self._bio, elapsed=elapsed)
+            with HARDWARE_LOCK:
+                data = self._measure(self._bio, elapsed=elapsed)
         except Exception as e:
             logger.error("measure_and_record_sensors failed: %s", e)
             data = {}
