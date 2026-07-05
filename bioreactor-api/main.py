@@ -24,6 +24,10 @@ from slowapi.errors import RateLimitExceeded
 import camera
 from auth import verify_token, limiter, RATE_LIMIT
 from control import heater, parse_schedule, ScheduleError, HARDWARE_LOCK, InsufficientStorageError
+from history import history
+
+# Where the rolling sensor-history buffer is persisted (survives restarts).
+HISTORY_FILE = Path(__file__).parent / 'sensor_history.json'
 
 # Directory where the bioreactor writes its data CSVs (run files live here).
 DATA_DIR = Path(__file__).parent / 'bioreactor_v3' / 'src' / 'bioreactor_data'
@@ -236,8 +240,19 @@ async def lifespan(app: FastAPI):
             max_heat=70.0, max_cool=100.0,
         )
 
+    # Rolling sensor-history buffer (samples continuously, independent of runs).
+    if getattr(config, 'HISTORY_ENABLED', True):
+        history.configure(
+            sample_fn=_read_signals,
+            persist_path=str(HISTORY_FILE),
+            interval_s=getattr(config, 'HISTORY_INTERVAL_S', 10),
+            window_s=int(getattr(config, 'HISTORY_WINDOW_H', 24)) * 3600,
+        )
+        history.start()
+
     yield
 
+    history.stop()
     heater.stop()
     if bioreactor:
         bioreactor.finish()
@@ -747,6 +762,19 @@ async def heater_status(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# Sensor history (rolling 24h buffer for the live plot)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/history")
+@limiter.limit(RATE_LIMIT)
+async def api_history(request: Request, since: int = 0):
+    """Rolling history of temp/ambient/current. `?since=<ms>` returns only points
+    newer than that timestamp (cheap incremental polling)."""
+    return {"status": "success", "interval_s": history.interval_s,
+            "points": history.get(since_ms=since)}
+
+
+# ---------------------------------------------------------------------------
 # Data files (download the most recent bioreactor run CSV)
 # ---------------------------------------------------------------------------
 
@@ -829,6 +857,48 @@ async def camera_snapshot(request: Request,
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
+
+def _read_signals():
+    """Read the three monitor signals (bath temp, ambient, signed peltier current).
+
+    Used by the history sampler thread; guarded by HARDWARE_LOCK in real mode.
+    Returns a dict with keys temperature / ambient_temp / peltier_current (None if
+    a component is unavailable or the read fails).
+    """
+    if simulation_mode:
+        return {
+            "temperature": round(36.5 + random.uniform(-0.5, 0.5), 2) if initialized_components.get('temp_sensor') else None,
+            "ambient_temp": round(22.0 + random.uniform(-1.0, 1.0), 2) if initialized_components.get('ambient_temp') else None,
+            "peltier_current": round(random.uniform(0.0, 0.05), 3) if initialized_components.get('peltier_current') else None,
+        }
+    from bioreactor_v3.src.io import (
+        get_temperature, read_ambient_temp, read_peltier_current, get_peltier_state,
+    )
+
+    def _rd(name, fn):
+        if not initialized_components.get(name):
+            return None
+        try:
+            v = fn()
+        except Exception:
+            return None
+        if v is not None and isinstance(v, float) and math.isnan(v):
+            return None
+        return v
+
+    with HARDWARE_LOCK:
+        temp = _rd('temp_sensor', lambda: get_temperature(bioreactor, sensor_index=0))
+        ambient = _rd('ambient_temp', lambda: read_ambient_temp(bioreactor))
+        current = _rd('peltier_current', lambda: read_peltier_current(bioreactor))
+        forward = True
+        if initialized_components.get('peltier_driver'):
+            ps = get_peltier_state(bioreactor)
+            if ps is not None:
+                _, forward = ps
+    if current is not None and not forward:
+        current = -current   # sign negative when heating, matching /api/state
+    return {"temperature": temp, "ambient_temp": ambient, "peltier_current": current}
+
 
 def _get_config():
     """Lazy-load config for simulation mode sensor defaults."""
