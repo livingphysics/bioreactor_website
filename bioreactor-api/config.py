@@ -70,6 +70,13 @@ class Config:
     CAMERA_ZOOM: float = 1.0     # 1.0 = full frame; 2.0 = 2x centered digital zoom
     CAMERA_QUALITY: int = 90
 
+    # Rolling sensor-history buffer (for the monitor's long-range plot).
+    # Samples temp/ambient/current continuously (independent of runs) and persists
+    # to sensor_history.json so it survives restarts. Served at GET /api/history.
+    HISTORY_ENABLED: bool = True
+    HISTORY_INTERVAL_S: int = 10   # sample period
+    HISTORY_WINDOW_H: int = 24     # hours retained
+
     # Stirrer (PWM only)
     STIRRER_PWM_PIN: int = 12
     STIRRER_PWM_FREQ: int = 1000
