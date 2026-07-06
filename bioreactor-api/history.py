@@ -90,6 +90,9 @@ class HistoryBuffer:
             "ambient": _num(data.get("ambient_temp")),
             "current": _num(data.get("peltier_current")),
         }
+        od = data.get("od")
+        if isinstance(od, dict):
+            pt["od"] = {k: _num(v) for k, v in od.items()}
         with self._lock:
             self._buf.append(pt)
             self._evict()

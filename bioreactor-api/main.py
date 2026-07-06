@@ -45,6 +45,11 @@ bioreactor = None  # Bioreactor instance (None in simulation mode)
 simulation_mode = True
 initialized_components: Dict[str, bool] = {}
 
+# Optical density: prefer the ADS1115 OD channels, else the eyespy boards, else none.
+# Set in lifespan. od_channels is the ordered list of channel/board names to plot.
+od_mode = 'none'          # 'od' | 'eyespy' | 'none'
+od_channels: list = []
+
 
 # ---------------------------------------------------------------------------
 # Pydantic request/response models
@@ -240,6 +245,19 @@ async def lifespan(app: FastAPI):
             max_heat=70.0, max_cool=100.0,
         )
 
+    # Pick the optical-density source: prefer OD channels, else eyespy, else none.
+    global od_mode, od_channels
+    if initialized_components.get('optical_density'):
+        od_mode = 'od'
+        od_channels = list(getattr(config, 'OD_ADC_CHANNELS', {}).keys())
+    elif initialized_components.get('eyespy_adc'):
+        od_mode = 'eyespy'
+        od_channels = list(getattr(config, 'EYESPY_ADC', {}).keys())
+    else:
+        od_mode = 'none'
+        od_channels = []
+    logger.info("Optical density source: %s %s", od_mode, od_channels)
+
     # Rolling sensor-history buffer (samples continuously, independent of runs).
     if getattr(config, 'HISTORY_ENABLED', True):
         history.configure(
@@ -363,6 +381,9 @@ async def state(request: Request):
         "peltier_current": current,
         "peltier": peltier,
         "heater": heater.status(),
+        "od": _read_od(),
+        "od_mode": od_mode,
+        "od_channels": od_channels,
     }
 
 
@@ -771,6 +792,7 @@ async def api_history(request: Request, since: int = 0):
     """Rolling history of temp/ambient/current. `?since=<ms>` returns only points
     newer than that timestamp (cheap incremental polling)."""
     return {"status": "success", "interval_s": history.interval_s,
+            "od_mode": od_mode, "od_channels": od_channels,
             "points": history.get(since_ms=since)}
 
 
@@ -870,6 +892,7 @@ def _read_signals():
             "temperature": round(36.5 + random.uniform(-0.5, 0.5), 2) if initialized_components.get('temp_sensor') else None,
             "ambient_temp": round(22.0 + random.uniform(-1.0, 1.0), 2) if initialized_components.get('ambient_temp') else None,
             "peltier_current": round(random.uniform(0.0, 0.05), 3) if initialized_components.get('peltier_current') else None,
+            "od": _read_od(),
         }
     from bioreactor_v3.src.io import (
         get_temperature, read_ambient_temp, read_peltier_current, get_peltier_state,
@@ -897,7 +920,35 @@ def _read_signals():
                 _, forward = ps
     if current is not None and not forward:
         current = -current   # sign negative when heating, matching /api/state
-    return {"temperature": temp, "ambient_temp": ambient, "peltier_current": current}
+    return {"temperature": temp, "ambient_temp": ambient, "peltier_current": current, "od": _read_od()}
+
+
+def _read_od():
+    """Read the optical-density channels -> {channel: volts} (or None if no OD source).
+
+    Uses od_mode/od_channels chosen at startup: the ADS1115 OD channels
+    (read_voltage) or the eyespy boards (read_eyespy_voltage). Real reads are
+    serialized on HARDWARE_LOCK (re-entrant, so safe if a caller already holds it).
+    """
+    if od_mode == 'none' or not od_channels:
+        return None
+    if simulation_mode:
+        # plausible slowly-varying OD voltages
+        return {ch: round(0.5 + 0.4 * i + random.uniform(-0.02, 0.02), 4)
+                for i, ch in enumerate(od_channels)}
+    if od_mode == 'od':
+        from bioreactor_v3.src.io import read_voltage as _read
+    else:
+        from bioreactor_v3.src.io import read_eyespy_voltage as _read
+    out = {}
+    with HARDWARE_LOCK:
+        for ch in od_channels:
+            try:
+                v = _read(bioreactor, ch)
+            except Exception:
+                v = None
+            out[ch] = None if (v is not None and isinstance(v, float) and math.isnan(v)) else v
+    return out
 
 
 def _get_config():
