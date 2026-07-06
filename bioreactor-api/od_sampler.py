@@ -97,6 +97,11 @@ class ODSampler:
         with self._lock:
             if enabled is not None:
                 self._enabled = bool(enabled)
+                # Drop any prior reading so a re-enable can't surface stale OD as
+                # "live" until a fresh gated pulse completes; restart interleaving.
+                self._latest = {}
+                self._latest_t = 0
+                self._src_idx = 0
             if led_power is not None:
                 self._led_power = max(0.0, min(float(led_power), 100.0))
             cfg = self._status_locked()
@@ -112,7 +117,12 @@ class ODSampler:
     def latest(self):
         with self._lock:
             if not self._enabled or not self._latest:
-                return None   # sampling off -> no live OD (plot shows a gap)
+                return None   # sampling off / nothing measured yet -> plot shows a gap
+            # If the sampler thread has stalled/died, don't keep surfacing an old
+            # reading as live — report a gap once the newest pulse is too stale.
+            stale_ms = max(10.0, 5.0 * self._period_s) * 1000.0
+            if self._latest_t and (int(time.time() * 1000) - self._latest_t) > stale_ms:
+                return None
             return dict(self._latest)
 
     def status(self):
