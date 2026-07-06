@@ -25,6 +25,7 @@ import camera
 from auth import verify_token, limiter, RATE_LIMIT
 from control import heater, parse_schedule, ScheduleError, HARDWARE_LOCK, InsufficientStorageError
 from history import history
+from od_sampler import od_sampler
 
 # Where the rolling sensor-history buffer is persisted (survives restarts).
 HISTORY_FILE = Path(__file__).parent / 'sensor_history.json'
@@ -270,6 +271,32 @@ async def lifespan(app: FastAPI):
     logger.info("Optical density: available=%s default mode=%s channels=%s",
                 od_available, od_mode, od_channels)
 
+    # IR-gated OD sampler: pulses the LED per reading (on -> settle -> read -> off),
+    # interleaving OD/eyespy when both are present. Its latest reading feeds /api/state
+    # and the history buffer (via _read_od). Started before history so OD is available.
+    if od_available['od'] or od_available['eyespy']:
+        if simulation_mode:
+            od_set_led, od_read_fns = (lambda p: None), {}
+        else:
+            from bioreactor_v3.src.io import (
+                set_led as _od_set_led, read_voltage as _od_rv,
+                read_eyespy_voltage as _od_rev,
+            )
+            od_set_led = lambda p: _od_set_led(bioreactor, p)
+            od_read_fns = {'od': lambda ch: _od_rv(bioreactor, ch),
+                           'eyespy': lambda b: _od_rev(bioreactor, b)}
+        od_sampler.configure(
+            hw_lock=HARDWARE_LOCK, set_led=od_set_led, read_fns=od_read_fns,
+            sources=[('od', od_channels['od']), ('eyespy', od_channels['eyespy'])],
+            sim=simulation_mode,
+            enabled=getattr(config, 'OD_SAMPLE_ENABLED', True),
+            led_power=getattr(config, 'OD_LED_POWER', 10.0),
+            settle_s=getattr(config, 'OD_SETTLE_S', 0.5),
+            post_read_s=getattr(config, 'OD_POST_READ_S', 0.1),
+            period_s=getattr(config, 'OD_PULSE_PERIOD_S', 1.0),
+        )
+        od_sampler.start()
+
     # Rolling sensor-history buffer (samples continuously, independent of runs).
     if getattr(config, 'HISTORY_ENABLED', True):
         history.configure(
@@ -282,6 +309,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    od_sampler.stop()
     history.stop()
     heater.stop()
     if bioreactor:
@@ -397,6 +425,7 @@ async def state(request: Request):
         "od_mode": od_mode,
         "od_channels": od_channels,
         "od_available": od_available,
+        "od_sampling": od_sampler.status() if (od_available['od'] or od_available['eyespy']) else None,
         "led": {"power": led_power, "active": led_power > 0} if initialized_components.get('led') else None,
     }
 
@@ -842,6 +871,27 @@ async def set_od_mode(request: Request, req: ODModeRequest):
             "od_channels": od_channels, "od_available": od_available}
 
 
+class ODSamplingRequest(BaseModel):
+    enabled: Optional[bool] = Field(default=None, description="turn IR-gated OD sampling on/off")
+    led_power: Optional[float] = Field(default=None, ge=0, le=100,
+                                       description="IR LED %% used for each gated reading")
+
+
+@app.post("/api/od/sampling")
+@limiter.limit(RATE_LIMIT)
+async def set_od_sampling(request: Request, req: ODSamplingRequest):
+    """Control the IR-gated OD measurement: on/off + per-reading LED power.
+
+    The LED only lights briefly during each gated reading (never steady-on); `enabled`
+    gates whether the sampler runs at all, `led_power` sets the illumination level."""
+    if not (od_available['od'] or od_available['eyespy']):
+        raise HTTPException(status_code=503, detail="No optical-density source available")
+    if req.enabled is None and req.led_power is None:
+        raise HTTPException(status_code=400, detail="provide 'enabled' and/or 'led_power'")
+    cfg = od_sampler.set_config(enabled=req.enabled, led_power=req.led_power)
+    return {"status": "success", "od_sampling": cfg}
+
+
 # ---------------------------------------------------------------------------
 # Data files (download the most recent bioreactor run CSV)
 # ---------------------------------------------------------------------------
@@ -970,40 +1020,10 @@ def _read_signals():
 
 
 def _read_od():
-    """Read every available OD source -> {channel: volts} (or None if no OD source).
-
-    Always reads all available channels (OD ADS1115 + eyespy boards) so the history
-    is complete regardless of the display mode; od_mode only selects which series the
-    frontend shows. Real reads are serialized on HARDWARE_LOCK (re-entrant).
-    """
-    if not (od_available['od'] or od_available['eyespy']):
-        return None
-    out = {}
-    if simulation_mode:
-        for src in ('od', 'eyespy'):
-            for i, ch in enumerate(od_channels[src]):
-                out[ch] = round(0.5 + 0.3 * i + random.uniform(-0.02, 0.02), 4)
-        return out or None
-
-    def _clean(v):
-        return None if (v is not None and isinstance(v, float) and math.isnan(v)) else v
-
-    with HARDWARE_LOCK:
-        if od_available['od']:
-            from bioreactor_v3.src.io import read_voltage
-            for ch in od_channels['od']:
-                try:
-                    out[ch] = _clean(read_voltage(bioreactor, ch))
-                except Exception:
-                    out[ch] = None
-        if od_available['eyespy']:
-            from bioreactor_v3.src.io import read_eyespy_voltage
-            for ch in od_channels['eyespy']:
-                try:
-                    out[ch] = _clean(read_eyespy_voltage(bioreactor, ch))
-                except Exception:
-                    out[ch] = None
-    return out or None
+    """Latest IR-gated OD reading from the OD sampler ({channel: volts}, or None if
+    no OD source / sampling disabled). The gated measurement (LED on -> read -> off)
+    happens on the od_sampler thread, not here."""
+    return od_sampler.latest()
 
 
 def _get_config():

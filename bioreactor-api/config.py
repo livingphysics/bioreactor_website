@@ -98,6 +98,22 @@ class Config:
         '90': 'A2',
     }
 
+    # IR-gated OD sampling (od_sampler.py). Every reading pulses the IR LED:
+    #   LED on (OD_LED_POWER) -> settle (OD_SETTLE_S) -> read -> pause (OD_POST_READ_S) -> LED off.
+    # Runs continuously (24/7) so the 24h OD history fills even when nobody's watching.
+    # When both OD and eyespy sources are present they interleave (one source per
+    # pulse), so each samples at half the pulse rate. The whole gated measurement is
+    # held under HARDWARE_LOCK (so nothing toggles the LED mid-read), which means the
+    # lock is occupied for ~settle+read+post each pulse. The 1 Hz heater safety loop
+    # shares that lock, so keep the settle short to bound lock occupancy: an IR LED +
+    # ADS1115 stabilise in <20 ms, so 0.25 s is ample and keeps occupancy well under
+    # the pulse period. led_power/enabled are also settable live via POST /api/od/sampling.
+    OD_SAMPLE_ENABLED: bool = True
+    OD_LED_POWER: float = 10.0       # IR LED % during each gated reading (frontend: 1–20%)
+    OD_SETTLE_S: float = 0.25        # settle after LED-on before reading (bounds lock occupancy)
+    OD_POST_READ_S: float = 0.05     # brief pause after reading before LED-off
+    OD_PULSE_PERIOD_S: float = 1.0   # LED-pulse period (single source 1 Hz; both 0.5 Hz each)
+
     # Eyespy ADC (ADS1114, single-channel per board)
     EYESPY_ADC: dict = {
         'eyespy1': {
