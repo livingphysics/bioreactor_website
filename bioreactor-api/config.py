@@ -33,7 +33,7 @@ class Config:
         'led': True,
         'ring_light': True,
         'optical_density': True,
-        'eyespy_adc': False,
+        'eyespy_adc': True,
         'co2_sensor': True,
         'o2_sensor': True,
         'ambient_temp': True,

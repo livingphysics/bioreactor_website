@@ -45,10 +45,15 @@ bioreactor = None  # Bioreactor instance (None in simulation mode)
 simulation_mode = True
 initialized_components: Dict[str, bool] = {}
 
-# Optical density: prefer the ADS1115 OD channels, else the eyespy boards, else none.
-# Set in lifespan. od_channels is the ordered list of channel/board names to plot.
-od_mode = 'none'          # 'od' | 'eyespy' | 'none'
-od_channels: list = []
+# Optical density. The sampler always reads every AVAILABLE source (od + eyespy);
+# `od_mode` is the shared *display* selection the frontend defaults to (settable via
+# POST /api/od/mode). Set in lifespan.
+od_mode = 'none'          # display mode: 'od' | 'eyespy' | 'both' | 'none'
+od_available = {'od': False, 'eyespy': False}
+od_channels = {'od': [], 'eyespy': []}   # source -> ordered channel/board names
+
+# Last commanded LED power (the driver doesn't report it back, so we shadow it here).
+led_power = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -245,18 +250,25 @@ async def lifespan(app: FastAPI):
             max_heat=70.0, max_cool=100.0,
         )
 
-    # Pick the optical-density source: prefer OD channels, else eyespy, else none.
-    global od_mode, od_channels
-    if initialized_components.get('optical_density'):
+    # Optical-density sources available (from config.py via what actually initialized).
+    global od_mode, od_channels, od_available
+    od_available = {'od': bool(initialized_components.get('optical_density')),
+                    'eyespy': bool(initialized_components.get('eyespy_adc'))}
+    od_channels = {
+        'od': list(getattr(config, 'OD_ADC_CHANNELS', {}).keys()) if od_available['od'] else [],
+        'eyespy': list(getattr(config, 'EYESPY_ADC', {}).keys()) if od_available['eyespy'] else [],
+    }
+    # Default display mode: both if both available, else whichever, else none.
+    if od_available['od'] and od_available['eyespy']:
+        od_mode = 'both'
+    elif od_available['od']:
         od_mode = 'od'
-        od_channels = list(getattr(config, 'OD_ADC_CHANNELS', {}).keys())
-    elif initialized_components.get('eyespy_adc'):
+    elif od_available['eyespy']:
         od_mode = 'eyespy'
-        od_channels = list(getattr(config, 'EYESPY_ADC', {}).keys())
     else:
         od_mode = 'none'
-        od_channels = []
-    logger.info("Optical density source: %s %s", od_mode, od_channels)
+    logger.info("Optical density: available=%s default mode=%s channels=%s",
+                od_available, od_mode, od_channels)
 
     # Rolling sensor-history buffer (samples continuously, independent of runs).
     if getattr(config, 'HISTORY_ENABLED', True):
@@ -384,6 +396,8 @@ async def state(request: Request):
         "od": _read_od(),
         "od_mode": od_mode,
         "od_channels": od_channels,
+        "od_available": od_available,
+        "led": {"power": led_power, "active": led_power > 0} if initialized_components.get('led') else None,
     }
 
 
@@ -419,11 +433,15 @@ async def capabilities(request: Request):
 @limiter.limit(RATE_LIMIT)
 async def led_control(request: Request, req: LEDControlRequest):
     require_component('led')
+    global led_power
     if simulation_mode:
         sim_state['led_power'] = req.power
+        led_power = req.power
         return LEDState(status="success", power=req.power, active=req.power > 0)
     from bioreactor_v3.src.io import set_led
-    set_led(bioreactor, req.power)
+    with HARDWARE_LOCK:
+        set_led(bioreactor, req.power)
+    led_power = req.power   # shadow it (driver doesn't report last power)
     return LEDState(status="success", power=req.power, active=req.power > 0)
 
 
@@ -792,8 +810,36 @@ async def api_history(request: Request, since: int = 0):
     """Rolling history of temp/ambient/current. `?since=<ms>` returns only points
     newer than that timestamp (cheap incremental polling)."""
     return {"status": "success", "interval_s": history.interval_s,
-            "od_mode": od_mode, "od_channels": od_channels,
+            "od_mode": od_mode, "od_channels": od_channels, "od_available": od_available,
             "points": history.get(since_ms=since)}
+
+
+class ODModeRequest(BaseModel):
+    mode: str = Field(pattern="^(od|eyespy|both|none)$", description="od | eyespy | both")
+
+
+def _valid_od_modes():
+    modes = []
+    if od_available['od']:
+        modes.append('od')
+    if od_available['eyespy']:
+        modes.append('eyespy')
+    if od_available['od'] and od_available['eyespy']:
+        modes.append('both')
+    return modes or ['none']
+
+
+@app.post("/api/od/mode")
+@limiter.limit(RATE_LIMIT)
+async def set_od_mode(request: Request, req: ODModeRequest):
+    """Set the shared optical-density display mode (od | eyespy | both)."""
+    global od_mode
+    valid = _valid_od_modes()
+    if req.mode not in valid:
+        raise HTTPException(status_code=400, detail=f"mode must be one of {valid}")
+    od_mode = req.mode
+    return {"status": "success", "od_mode": od_mode,
+            "od_channels": od_channels, "od_available": od_available}
 
 
 # ---------------------------------------------------------------------------
@@ -924,31 +970,40 @@ def _read_signals():
 
 
 def _read_od():
-    """Read the optical-density channels -> {channel: volts} (or None if no OD source).
+    """Read every available OD source -> {channel: volts} (or None if no OD source).
 
-    Uses od_mode/od_channels chosen at startup: the ADS1115 OD channels
-    (read_voltage) or the eyespy boards (read_eyespy_voltage). Real reads are
-    serialized on HARDWARE_LOCK (re-entrant, so safe if a caller already holds it).
+    Always reads all available channels (OD ADS1115 + eyespy boards) so the history
+    is complete regardless of the display mode; od_mode only selects which series the
+    frontend shows. Real reads are serialized on HARDWARE_LOCK (re-entrant).
     """
-    if od_mode == 'none' or not od_channels:
+    if not (od_available['od'] or od_available['eyespy']):
         return None
-    if simulation_mode:
-        # plausible slowly-varying OD voltages
-        return {ch: round(0.5 + 0.4 * i + random.uniform(-0.02, 0.02), 4)
-                for i, ch in enumerate(od_channels)}
-    if od_mode == 'od':
-        from bioreactor_v3.src.io import read_voltage as _read
-    else:
-        from bioreactor_v3.src.io import read_eyespy_voltage as _read
     out = {}
+    if simulation_mode:
+        for src in ('od', 'eyespy'):
+            for i, ch in enumerate(od_channels[src]):
+                out[ch] = round(0.5 + 0.3 * i + random.uniform(-0.02, 0.02), 4)
+        return out or None
+
+    def _clean(v):
+        return None if (v is not None and isinstance(v, float) and math.isnan(v)) else v
+
     with HARDWARE_LOCK:
-        for ch in od_channels:
-            try:
-                v = _read(bioreactor, ch)
-            except Exception:
-                v = None
-            out[ch] = None if (v is not None and isinstance(v, float) and math.isnan(v)) else v
-    return out
+        if od_available['od']:
+            from bioreactor_v3.src.io import read_voltage
+            for ch in od_channels['od']:
+                try:
+                    out[ch] = _clean(read_voltage(bioreactor, ch))
+                except Exception:
+                    out[ch] = None
+        if od_available['eyespy']:
+            from bioreactor_v3.src.io import read_eyespy_voltage
+            for ch in od_channels['eyespy']:
+                try:
+                    out[ch] = _clean(read_eyespy_voltage(bioreactor, ch))
+                except Exception:
+                    out[ch] = None
+    return out or None
 
 
 def _get_config():
