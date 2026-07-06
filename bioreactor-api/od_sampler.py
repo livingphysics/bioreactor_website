@@ -70,6 +70,13 @@ class ODSampler:
     def has_sources(self) -> bool:
         return bool(self._sources)
 
+    @property
+    def led_power(self) -> float:
+        """Current IR LED % (the live dropdown value); also used by the heater
+        run loop so run-CSV OD is illuminated identically to the live buffer."""
+        with self._lock:
+            return self._led_power
+
     def start(self):
         if not self._sources or self._thread and self._thread.is_alive():
             return
