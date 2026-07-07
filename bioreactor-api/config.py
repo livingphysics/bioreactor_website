@@ -71,11 +71,15 @@ class Config:
     CAMERA_QUALITY: int = 90
 
     # Rolling sensor-history buffer (for the monitor's long-range plot).
-    # Samples temp/ambient/current continuously (independent of runs) and persists
-    # to sensor_history.json so it survives restarts. Served at GET /api/history.
+    # Samples temp/ambient/current/OD continuously (independent of runs). Served at
+    # GET /api/history from an in-memory HISTORY_WINDOW_H window; every sample is also
+    # appended to a daily archive file history/YYYY-MM-DD.jsonl and kept for
+    # HISTORY_RETENTION_DAYS (files older than that are pruned). Append-only, so a
+    # year of data costs ~0.5 GB and only a few MB/day of SD writes.
     HISTORY_ENABLED: bool = True
-    HISTORY_INTERVAL_S: int = 10   # sample period
-    HISTORY_WINDOW_H: int = 24     # hours retained
+    HISTORY_INTERVAL_S: int = 10        # sample period
+    HISTORY_WINDOW_H: int = 24          # hours kept in memory + served to the frontend
+    HISTORY_RETENTION_DAYS: int = 365   # days of daily archive files kept on disk
 
     # Stirrer (PWM only)
     STIRRER_PWM_PIN: int = 12

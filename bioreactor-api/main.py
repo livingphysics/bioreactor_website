@@ -27,8 +27,10 @@ from control import heater, parse_schedule, ScheduleError, HARDWARE_LOCK, Insuff
 from history import history
 from od_sampler import od_sampler
 
-# Where the rolling sensor-history buffer is persisted (survives restarts).
+# Rolling sensor-history: legacy single-file buffer (migrated once on first boot of
+# the daily-archive version) + the daily-archive directory (history/YYYY-MM-DD.jsonl).
 HISTORY_FILE = Path(__file__).parent / 'sensor_history.json'
+HISTORY_DIR = Path(__file__).parent / 'history'
 
 # Directory where the bioreactor writes its data CSVs (run files live here).
 DATA_DIR = Path(__file__).parent / 'bioreactor_v3' / 'src' / 'bioreactor_data'
@@ -302,9 +304,11 @@ async def lifespan(app: FastAPI):
     if getattr(config, 'HISTORY_ENABLED', True):
         history.configure(
             sample_fn=_read_signals,
-            persist_path=str(HISTORY_FILE),
+            archive_dir=str(HISTORY_DIR),
             interval_s=getattr(config, 'HISTORY_INTERVAL_S', 10),
             window_s=int(getattr(config, 'HISTORY_WINDOW_H', 24)) * 3600,
+            retention_days=int(getattr(config, 'HISTORY_RETENTION_DAYS', 365)),
+            legacy_path=str(HISTORY_FILE),
         )
         history.start()
 
