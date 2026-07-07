@@ -43,6 +43,7 @@ logs/
 
 # Bioreactor API runtime state
 sensor_history.json
+bioreactor-api/history/
 
 # Docker
 .dockerignore
