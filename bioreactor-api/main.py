@@ -236,7 +236,9 @@ async def lifespan(app: FastAPI):
                 retention_max_mb=getattr(config, 'DATA_RETENTION_MAX_MB', 1000),
                 retention_keep=getattr(config, 'DATA_RETENTION_KEEP', 10),
                 min_free_mb=getattr(config, 'DATA_MIN_FREE_MB', 500),
-                od_power_fn=lambda: od_sampler.led_power,   # live dropdown value
+                od_power_fn=lambda: od_sampler.led_power,       # live dropdown value
+                od_latest_fn=lambda: od_sampler.latest(),       # cached OD for run-CSV (fast tick)
+                gas_latest_fn=lambda: gas_sampler.latest(),     # cached CO2/O2 for run-CSV
             )
             heater.prune()  # trim old run files on startup
         except Exception as e:
