@@ -116,7 +116,11 @@ class Config:
     OD_LED_POWER: float = 10.0       # IR LED % during each gated reading (frontend: 1–20%)
     OD_SETTLE_S: float = 0.25        # settle after LED-on before reading (bounds lock occupancy)
     OD_POST_READ_S: float = 0.05     # brief pause after reading before LED-off
-    OD_PULSE_PERIOD_S: float = 1.0   # LED-pulse period (single source 1 Hz; both 0.5 Hz each)
+    OD_PULSE_PERIOD_S: float = 5.0   # LED-pulse period. Pulses every 5s; with both sources
+                                     # interleaved each channel samples every 10s (0.1 Hz),
+                                     # aligning with the 10s history archive so every point
+                                     # gets a fresh OD reading. ~5x fewer IR pulses than 1 Hz,
+                                     # which also cuts the ring-light SPI-noise glitching.
 
     # Eyespy ADC (ADS1114, single-channel per board)
     EYESPY_ADC: dict = {
