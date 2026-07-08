@@ -26,6 +26,7 @@ from auth import verify_token, limiter, RATE_LIMIT
 from control import heater, parse_schedule, ScheduleError, HARDWARE_LOCK, InsufficientStorageError
 from history import history
 from od_sampler import od_sampler
+from gas_sampler import gas_sampler
 
 # Rolling sensor-history: legacy single-file buffer (migrated once on first boot of
 # the daily-archive version) + the daily-archive directory (history/YYYY-MM-DD.jsonl).
@@ -323,6 +324,28 @@ async def lifespan(app: FastAPI):
         )
         od_sampler.start()
 
+    # Atlas CO2 + O2 gas sampler: slow I2C reads (~1.5s each), polled in the background
+    # and cached for /api/state + history so the poll path stays fast.
+    gas_sensors = []
+    _gas_delay = int(getattr(config, 'GAS_READ_DELAY_MS', 1500))
+    for _name, _comp, _cfg_attr, _cast in (
+        ('co2', 'co2_sensor', 'co2_sensor_config', (lambda v: int(round(v)))),
+        ('o2', 'o2_sensor', 'o2_sensor_config', (lambda v: float(v))),
+    ):
+        if not initialized_components.get(_comp):
+            continue
+        _dev = None
+        if not simulation_mode and bioreactor is not None:
+            _dev = (getattr(bioreactor, _cfg_attr, {}) or {}).get('atlas_device')
+            if _dev is None:
+                continue
+        gas_sensors.append({'name': _name, 'device': _dev, 'delay': _gas_delay, 'cast': _cast})
+    if gas_sensors:
+        gas_sampler.configure(hw_lock=HARDWARE_LOCK, sensors=gas_sensors, sim=simulation_mode,
+                              period_s=getattr(config, 'GAS_SAMPLE_PERIOD_S', 5.0))
+        gas_sampler.start()
+        logger.info("Gas sensors available: %s", [s['name'] for s in gas_sensors])
+
     # Rolling sensor-history buffer (samples continuously, independent of runs).
     if getattr(config, 'HISTORY_ENABLED', True):
         history.configure(
@@ -337,6 +360,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    gas_sampler.stop()
     od_sampler.stop()
     history.stop()
     heater.stop()
@@ -441,6 +465,8 @@ async def state(request: Request):
         if current is not None and not forward:
             current = -current
 
+    _gas = gas_sampler.latest()
+
     return {
         "status": "success",
         "timestamp": _time.time(),
@@ -449,6 +475,8 @@ async def state(request: Request):
         "peltier_current": current,
         "peltier": peltier,
         "heater": heater.status(),
+        "co2": _gas.get('co2') if initialized_components.get('co2_sensor') else None,
+        "o2": _gas.get('o2') if initialized_components.get('o2_sensor') else None,
         "od": _read_od(),
         "od_mode": od_mode,
         "od_channels": od_channels,
@@ -706,6 +734,26 @@ async def ambient_temp_state(request: Request):
     if temp is not None and isinstance(temp, float) and math.isnan(temp):
         temp = None
     return AmbientTempState(status="success", temperature=temp)
+
+
+# ---------------------------------------------------------------------------
+# Atlas CO2 / O2 gas sensors
+# Served from the gas sampler's cache — a live Atlas read takes ~1.5s, too slow
+# for a request path, so the background sampler polls them every GAS_SAMPLE_PERIOD_S.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/co2_sensor/state")
+@limiter.limit(RATE_LIMIT)
+async def co2_sensor_state(request: Request):
+    require_component('co2_sensor')
+    return {"status": "success", "co2_ppm": gas_sampler.latest().get('co2')}
+
+
+@app.get("/api/o2_sensor/state")
+@limiter.limit(RATE_LIMIT)
+async def o2_sensor_state(request: Request):
+    require_component('o2_sensor')
+    return {"status": "success", "o2_percent": gas_sampler.latest().get('o2')}
 
 
 # ---------------------------------------------------------------------------
@@ -1017,10 +1065,13 @@ def _read_signals():
     a component is unavailable or the read fails).
     """
     if simulation_mode:
+        _gas = gas_sampler.latest()
         return {
             "temperature": round(36.5 + random.uniform(-0.5, 0.5), 2) if initialized_components.get('temp_sensor') else None,
             "ambient_temp": round(22.0 + random.uniform(-1.0, 1.0), 2) if initialized_components.get('ambient_temp') else None,
             "peltier_current": round(random.uniform(0.0, 0.05), 3) if initialized_components.get('peltier_current') else None,
+            "co2": _gas.get('co2') if initialized_components.get('co2_sensor') else None,
+            "o2": _gas.get('o2') if initialized_components.get('o2_sensor') else None,
             "od": _read_od(),
         }
     from bioreactor_v3.src.io import (
@@ -1049,7 +1100,11 @@ def _read_signals():
                 _, forward = ps
     if current is not None and not forward:
         current = -current   # sign negative when heating, matching /api/state
-    return {"temperature": temp, "ambient_temp": ambient, "peltier_current": current, "od": _read_od()}
+    _gas = gas_sampler.latest()
+    return {"temperature": temp, "ambient_temp": ambient, "peltier_current": current,
+            "co2": _gas.get('co2') if initialized_components.get('co2_sensor') else None,
+            "o2": _gas.get('o2') if initialized_components.get('o2_sensor') else None,
+            "od": _read_od()}
 
 
 def _read_od():

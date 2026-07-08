@@ -119,6 +119,8 @@ class HistoryBuffer:
             "temp": _num(data.get("temperature"), 3),
             "ambient": _num(data.get("ambient_temp"), 3),
             "current": _num(data.get("peltier_current"), 4),
+            "co2": _num(data.get("co2")),         # ppm (int)
+            "o2": _num(data.get("o2"), 2),        # % (2 dp)
         }
         od = data.get("od")
         if isinstance(od, dict):
