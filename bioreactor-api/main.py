@@ -58,6 +58,10 @@ od_channels = {'od': [], 'eyespy': []}   # source -> ordered channel/board names
 # Last commanded LED power (the driver doesn't report it back, so we shadow it here).
 led_power = 0.0
 
+# Last commanded ring-light colour, shadowed so /api/state can surface it for the
+# always-visible "ring" status card without a per-poll hardware read.
+ring_color = {'red': 0, 'green': 0, 'blue': 0}
+
 
 # ---------------------------------------------------------------------------
 # Pydantic request/response models
@@ -274,6 +278,18 @@ async def lifespan(app: FastAPI):
     logger.info("Optical density: available=%s default mode=%s channels=%s",
                 od_available, od_mode, od_channels)
 
+    # Seed the ring-light shadow from the driver's current colour (best-effort).
+    global ring_color
+    if not simulation_mode and bioreactor and initialized_components.get('ring_light'):
+        try:
+            from bioreactor_v3.src.io import get_ring_light_color
+            with HARDWARE_LOCK:
+                c = get_ring_light_color(bioreactor)
+            if c:
+                ring_color = {'red': int(c[0]), 'green': int(c[1]), 'blue': int(c[2])}
+        except Exception as e:
+            logger.warning("Could not read initial ring-light colour: %s", e)
+
     # IR-gated OD sampler: pulses the LED per reading (on -> settle -> read -> off),
     # interleaving OD/eyespy when both are present. Its latest reading feeds /api/state
     # and the history buffer (via _read_od). Started before history so OD is available.
@@ -432,6 +448,7 @@ async def state(request: Request):
         "od_available": od_available,
         "od_sampling": od_sampler.status() if (od_available['od'] or od_available['eyespy']) else None,
         "led": {"power": led_power, "active": led_power > 0} if initialized_components.get('led') else None,
+        "ring": {**ring_color, "active": any(ring_color.values())} if initialized_components.get('ring_light') else None,
     }
 
 
@@ -563,14 +580,18 @@ async def stirrer_state(request: Request):
 @limiter.limit(RATE_LIMIT)
 async def ring_light_control(request: Request, req: RingLightControlRequest):
     require_component('ring_light')
+    global ring_color
     if simulation_mode:
         sim_state['ring_r'] = req.red
         sim_state['ring_g'] = req.green
         sim_state['ring_b'] = req.blue
+        ring_color = {'red': req.red, 'green': req.green, 'blue': req.blue}
         active = any([req.red, req.green, req.blue])
         return RingLightState(status="success", red=req.red, green=req.green, blue=req.blue, active=active)
     from bioreactor_v3.src.io import set_ring_light
-    set_ring_light(bioreactor, (req.red, req.green, req.blue), pixel=req.pixel_index)
+    with HARDWARE_LOCK:
+        set_ring_light(bioreactor, (req.red, req.green, req.blue), pixel=req.pixel_index)
+    ring_color = {'red': req.red, 'green': req.green, 'blue': req.blue}
     active = any([req.red, req.green, req.blue])
     return RingLightState(status="success", red=req.red, green=req.green, blue=req.blue, active=active)
 
