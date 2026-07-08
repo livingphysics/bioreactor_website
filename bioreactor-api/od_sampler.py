@@ -35,7 +35,7 @@ class ODSampler:
         self._set_led = None               # callable(power_percent)
         self._read_fns = {}                # {'od': fn(ch)->v, 'eyespy': fn(ch)->v}
         self._sources = []                 # [('od', [chans...]), ('eyespy', [chans...])]
-        self._ring_refresh = None          # callable() -> re-assert ring colour after a pulse
+        self._ring_dodge = None            # callable(active): ring off for the read, then restore
         self._sim = False
 
         # config (frontend-settable)
@@ -53,13 +53,13 @@ class ODSampler:
     # ------------------------------------------------------------------ setup
     def configure(self, *, hw_lock, set_led, read_fns, sources, sim,
                   enabled=True, led_power=10.0, settle_s=0.5, post_read_s=0.1, period_s=1.0,
-                  ring_refresh=None):
+                  ring_dodge=None):
         with self._lock:
             self._hw_lock = hw_lock
             self._set_led = set_led
             self._read_fns = read_fns
             self._sources = [(name, chans) for (name, chans) in sources if chans]
-            self._ring_refresh = ring_refresh
+            self._ring_dodge = ring_dodge
             self._sim = sim
             self._enabled = enabled
             self._led_power = max(0.0, min(float(led_power), 100.0))
@@ -178,24 +178,37 @@ class ODSampler:
             fn = self._read_fns.get(name)
             # Atomic gated measurement: hold the bus so nothing toggles the LED mid-read.
             with self._hw_lock:
-                self._set_led(power)                 # IR on
-                time.sleep(settle)                   # settle
-                for ch in chans:
+                dodged = False
+                try:
+                    # Dodge: turn the ring OFF for the whole IR-on window so its light
+                    # can't contaminate the read (and it's off while the IR PWM couples
+                    # SPI noise into the ring's data line). Restored in `finally`, which
+                    # also re-asserts the colour and so corrects any noise glitch.
+                    if self._ring_dodge:
+                        try:
+                            self._ring_dodge(True)
+                            dodged = True
+                        except Exception:
+                            pass
+                    self._set_led(power)             # IR on
+                    time.sleep(settle)               # settle
+                    for ch in chans:
+                        try:
+                            v = fn(ch) if fn else None
+                        except Exception:
+                            v = None
+                        readings[ch] = None if (isinstance(v, float) and v != v) else v
+                    time.sleep(post)                 # post-read pause
+                finally:
                     try:
-                        v = fn(ch) if fn else None
-                    except Exception:
-                        v = None
-                    readings[ch] = None if (isinstance(v, float) and v != v) else v
-                time.sleep(post)                     # post-read pause
-                self._set_led(0)                     # IR off
-                # The IR-LED PWM couples SPI noise into the Neopixel data line, which
-                # can flip a ring pixel on. Now that the LED is off (PWM stopped),
-                # re-assert the ring's commanded colour to snap it back.
-                if self._ring_refresh:
-                    try:
-                        self._ring_refresh()
+                        self._set_led(0)             # IR off (always)
                     except Exception:
                         pass
+                    if dodged:
+                        try:
+                            self._ring_dodge(False)  # restore the ring (always)
+                        except Exception:
+                            pass
 
         with self._lock:
             self._latest.update(readings)
