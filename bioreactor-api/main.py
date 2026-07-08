@@ -23,7 +23,9 @@ from slowapi.errors import RateLimitExceeded
 
 import camera
 from auth import verify_token, limiter, RATE_LIMIT
-from control import heater, parse_schedule, ScheduleError, HARDWARE_LOCK, InsufficientStorageError
+from control import (heater, parse_schedule, ScheduleError, HARDWARE_LOCK,
+                     InsufficientStorageError, TEMP_MIN_C, TEMP_MAX_C)
+from program import parse_program, ProgramError
 from history import history
 from od_sampler import od_sampler
 from gas_sampler import gas_sampler
@@ -239,6 +241,8 @@ async def lifespan(app: FastAPI):
                 od_power_fn=lambda: od_sampler.led_power,       # live dropdown value
                 od_latest_fn=lambda: od_sampler.latest(),       # cached OD for run-CSV (fast tick)
                 gas_latest_fn=lambda: gas_sampler.latest(),     # cached CO2/O2 for run-CSV
+                ring_apply_fn=_program_apply_ring,              # program ring cmd -> strip + shadow
+                stirrer_apply_fn=_program_apply_stirrer,        # program stirrer cmd
             )
             heater.prune()  # trim old run files on startup
         except Exception as e:
@@ -553,16 +557,19 @@ async def led_state(request: Request):
 @limiter.limit(RATE_LIMIT)
 async def peltier_control(request: Request, req: PeltierControlRequest):
     require_component('peltier_driver')
-    if heater.active:
+    # During a legacy schedule/PID run manual control is blocked; during a program run
+    # it's allowed and becomes an override (holds until the peltier track's next step).
+    if heater.active and heater.mode != 'program':
         raise HTTPException(status_code=409,
                             detail="a heater run (schedule/PID) is active; stop it before manual control")
     if simulation_mode:
         sim_state['peltier_duty'] = req.duty_cycle
         sim_state['peltier_direction'] = req.direction
-        return PeltierState(status="success", duty_cycle=req.duty_cycle, direction=req.direction, active=req.duty_cycle > 0)
-    from bioreactor_v3.src.io import set_peltier_power
-    with HARDWARE_LOCK:
-        set_peltier_power(bioreactor, req.duty_cycle, req.direction)
+    else:
+        from bioreactor_v3.src.io import set_peltier_power
+        with HARDWARE_LOCK:
+            set_peltier_power(bioreactor, req.duty_cycle, req.direction)
+    heater.note_override('peltier')   # no-op unless a program is running
     return PeltierState(status="success", duty_cycle=req.duty_cycle, direction=req.direction, active=req.duty_cycle > 0)
 
 
@@ -594,6 +601,7 @@ async def stirrer_control(request: Request, req: StirrerControlRequest):
         return StirrerState(status="success", duty_cycle=req.duty_cycle, active=req.duty_cycle > 0)
     from bioreactor_v3.src.io import set_stirrer_speed
     set_stirrer_speed(bioreactor, req.duty_cycle)
+    heater.note_override('stirrer')   # release from the schedule until the next stirrer step
     return StirrerState(status="success", duty_cycle=req.duty_cycle, active=req.duty_cycle > 0)
 
 
@@ -623,12 +631,14 @@ async def ring_light_control(request: Request, req: RingLightControlRequest):
         sim_state['ring_g'] = req.green
         sim_state['ring_b'] = req.blue
         ring_color = {'red': req.red, 'green': req.green, 'blue': req.blue}
+        heater.note_override('ring')
         active = any([req.red, req.green, req.blue])
         return RingLightState(status="success", red=req.red, green=req.green, blue=req.blue, active=active)
     from bioreactor_v3.src.io import set_ring_light
     with HARDWARE_LOCK:
         set_ring_light(bioreactor, (req.red, req.green, req.blue), pixel=req.pixel_index)
     ring_color = {'red': req.red, 'green': req.green, 'blue': req.blue}
+    heater.note_override('ring')   # release from the schedule until the next ring step
     active = any([req.red, req.green, req.blue])
     return RingLightState(status="success", red=req.red, green=req.green, blue=req.blue, active=active)
 
@@ -897,6 +907,33 @@ async def heater_pid(request: Request, req: HeaterPIDRequest):
     return {"status": "success", "mode": "pid", **heater.status()}
 
 
+@app.post("/api/heater/program")
+@limiter.limit(RATE_LIMIT)
+async def heater_program(request: Request):
+    """Upload + run a multi-device program (JSON). Parallel per-device tracks step
+    through their commands; manual dashboard changes override a device until its
+    track's next step. Body is the program JSON (see program.py)."""
+    require_component('peltier_driver')
+    raw = await request.body()
+    limits = {'max_heat': heater.max_heat, 'max_cool': heater.max_cool,
+              'temp_min': TEMP_MIN_C, 'temp_max': TEMP_MAX_C}
+    try:
+        prog = parse_program(raw.decode('utf-8'), limits=limits)
+    except (UnicodeDecodeError, ProgramError) as e:
+        raise HTTPException(status_code=400, detail=f"invalid program: {e}")
+    # temp steps need a temp sensor for the PID
+    if not simulation_mode and any(
+            s.command == 'temp' for tr in prog.tracks for s in tr.steps):
+        require_component('temp_sensor')
+    try:
+        heater.start_program(prog, gains=getattr(prog, 'gains', None))
+    except InsufficientStorageError as e:
+        raise HTTPException(status_code=507, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"status": "success", "mode": "program", **heater.status()}
+
+
 @app.post("/api/heater/stop")
 @limiter.limit(RATE_LIMIT)
 async def heater_stop(request: Request):
@@ -1130,6 +1167,31 @@ def _ring_dodge(active):
         driver.dodge_off()   # blank the strip, keep the commanded colour
     else:
         driver.refresh()     # restore the commanded colour (silent)
+
+
+def _program_apply_ring(color):
+    """Apply a program track's ring command: set the strip AND update the /api/state
+    shadow so the readout/plot reflect the program-driven colour."""
+    global ring_color
+    r, g, b = int(color[0]), int(color[1]), int(color[2])
+    if simulation_mode or bioreactor is None:
+        sim_state['ring_r'], sim_state['ring_g'], sim_state['ring_b'] = r, g, b
+    else:
+        from bioreactor_v3.src.io import set_ring_light
+        with HARDWARE_LOCK:
+            set_ring_light(bioreactor, (r, g, b))
+    ring_color = {'red': r, 'green': g, 'blue': b}
+
+
+def _program_apply_stirrer(duty):
+    """Apply a program track's stirrer command."""
+    d = float(duty)
+    if simulation_mode or bioreactor is None:
+        sim_state['stirrer_duty'] = d
+    else:
+        from bioreactor_v3.src.io import set_stirrer_speed
+        with HARDWARE_LOCK:
+            set_stirrer_speed(bioreactor, d)
 
 
 def _get_config():
