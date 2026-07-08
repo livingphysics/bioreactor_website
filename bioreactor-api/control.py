@@ -33,6 +33,7 @@ TEMP_MAX_C = 60.0
 TEMP_MIN_C = 2.0
 MAX_NAN_SAMPLES = 15
 SAMPLE_PERIOD_S = 1.0
+DEFAULT_GAINS = {'kp': 12.0, 'ki': 0.015, 'kd': 0.0}
 
 # Serializes all bioreactor hardware access (I2C / GPIO) between the control-loop
 # thread and FastAPI request threads, which otherwise hit the same bus with no
@@ -45,7 +46,7 @@ HARDWARE_LOCK = threading.RLock()
 # Retention only ever touches files THIS engine creates (these suffixes) at the
 # top level of the data dir — never the historical/committed data, the
 # bioreactor's own files, or subdirectories.
-RUN_FILE_SUFFIXES = ('_peltier_schedule.csv', '_pid_run.csv')
+RUN_FILE_SUFFIXES = ('_peltier_schedule.csv', '_pid_run.csv', '_program.csv')
 
 
 class InsufficientStorageError(Exception):
@@ -175,6 +176,8 @@ class HeaterController:
         self._od_power_fn = None         # callable -> live IR LED % for the per-tick OD read
         self._od_latest_fn = None        # callable -> cached OD dict (from the OD sampler)
         self._gas_latest_fn = None       # callable -> cached {'co2','o2'} (from the gas sampler)
+        self._ring_apply_fn = None       # callable(color) -> apply program ring command (+ shadow)
+        self._stirrer_apply_fn = None    # callable(duty)  -> apply program stirrer command
 
         self._reset_state()
 
@@ -182,7 +185,8 @@ class HeaterController:
     def configure(self, *, bio, sim, sim_state, io_module, pid_func, measure_func,
                   data_dir, max_heat, max_cool,
                   retention_max_mb=1000, retention_keep=10, min_free_mb=500,
-                  od_power_fn=None, od_latest_fn=None, gas_latest_fn=None):
+                  od_power_fn=None, od_latest_fn=None, gas_latest_fn=None,
+                  ring_apply_fn=None, stirrer_apply_fn=None):
         with self._lock:
             self._bio = bio
             self._sim = sim
@@ -199,6 +203,8 @@ class HeaterController:
             self._od_power_fn = od_power_fn
             self._od_latest_fn = od_latest_fn
             self._gas_latest_fn = gas_latest_fn
+            self._ring_apply_fn = ring_apply_fn
+            self._stirrer_apply_fn = stirrer_apply_fn
 
     def prune(self):
         """Prune old run files now (e.g. on startup). No-op in simulation."""
@@ -246,7 +252,7 @@ class HeaterController:
         return self._max_cool
 
     def _reset_state(self):
-        self.mode = 'idle'            # 'idle' | 'schedule' | 'pid'
+        self.mode = 'idle'            # 'idle' | 'schedule' | 'pid' | 'program'
         self.active = False
         self.steps: Optional[List[Dict[str, Any]]] = None
         self.step_idx = -1
@@ -261,6 +267,12 @@ class HeaterController:
         self.nan_count = 0
         self.tick_errors = 0
         self.last: Dict[str, Any] = {}
+        # multi-track program state
+        self.program = None                        # program.Program | None
+        self.program_end: Optional[float] = None   # run_t0 + duration (None = until tracks done)
+        self._track_state: List[Dict[str, Any]] = []  # per-track {idx, seg_end, state, step}
+        self._overrides: set = set()               # devices manually overridden this segment
+        self._applied: Dict[str, Any] = {}          # last command applied per device (for status)
 
     # ---------------------------------------------------------------- control
     def start_schedule(self, steps: List[Dict[str, Any]]):
@@ -297,6 +309,40 @@ class HeaterController:
                             delattr(self._bio, attr)
                 self._begin()
 
+    def start_program(self, program, gains: Optional[Dict[str, float]] = None):
+        """Start a multi-track program (see program.Program). Runs all tracks in
+        parallel; each applies its command once per step boundary."""
+        with self._lifecycle:
+            with self._lock:
+                if self.active:
+                    raise RuntimeError("a heater run is already active")
+            self._prepare_storage()
+            with self._lock:
+                self._reset_state()
+                self.mode = 'program'
+                self.program = program
+                self.gains = {**DEFAULT_GAINS, **(gains or {})}
+                self._track_state = [
+                    {'idx': -1, 'seg_end': None, 'state': 'run', 'step': None}
+                    for _ in program.tracks
+                ]
+                self._overrides = set()
+                self._applied = {}
+                if self._bio is not None:   # clear any stale PID integrator state
+                    for attr in ('_temp_integral', '_temp_last_error',
+                                 '_temp_last_time', '_temp_last_derivative'):
+                        if hasattr(self._bio, attr):
+                            delattr(self._bio, attr)
+                self._begin()
+
+    def note_override(self, device: str):
+        """Called when a device is manually set via the API during a program run, so
+        the schedule leaves it alone until that track's next step reclaims it (and, for
+        the peltier, the PID is suspended until then)."""
+        with self._lock:
+            if self.active and self.mode == 'program':
+                self._overrides.add(device)
+
     def _begin(self):
         """Start the loop. Caller must hold the lock."""
         # Open the data file first: if it fails (e.g. disk full), we haven't yet
@@ -305,6 +351,8 @@ class HeaterController:
             self._open_data_file()
         self.active = True
         self.run_t0 = time.time()
+        if self.mode == 'program' and self.program is not None and self.program.duration_s is not None:
+            self.program_end = self.run_t0 + self.program.duration_s
         self.nan_count = 0
         self.completed = False
         self.aborted = False
@@ -343,7 +391,7 @@ class HeaterController:
     def _open_data_file(self):
         os.makedirs(self._data_dir, exist_ok=True)
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        suffix = 'peltier_schedule' if self.mode == 'schedule' else 'pid_run'
+        suffix = {'schedule': 'peltier_schedule', 'program': 'program'}.get(self.mode, 'pid_run')
         path = os.path.join(self._data_dir, f"{ts}_{suffix}.csv")
         f = open(path, 'w', newline='')
         writer = csv.DictWriter(f, fieldnames=self._bio.fieldnames)
@@ -432,6 +480,97 @@ class HeaterController:
                     with HARDWARE_LOCK:
                         self._pid(self._bio, setpoint=self.setpoint,
                                   current_temp=temp, **self.gains)
+            elif self.mode == 'program':
+                self._program_tick()
+
+    # -------------------------------------------------------------- program mode
+    def _program_tick(self):
+        now = time.time()
+        # 1. advance every track; apply commands at step boundaries (ring/stirrer/heater
+        #    are set once here; temp just sets self.setpoint for the per-tick PID below)
+        for i in range(len(self._track_state)):
+            self._advance_track(i, now)
+        # 2. whole-program end (duration reached, or every track exhausted)
+        if self._program_finished(now):
+            self._finish(completed=True)
+            return
+        # 3. read temp + log the CSV row + safety checks (sets self.last)
+        self._sample_and_supervise()
+        if not self.active:
+            return
+        # 4. drive the peltier from the current temp step's PID, unless it's open-loop
+        #    (heater step / no peltier track) or manually overridden this segment
+        if self.setpoint is not None and 'peltier' not in self._overrides and not self._sim:
+            temp = self.last.get('temperature')
+            if temp is not None and temp == temp:   # not NaN
+                with HARDWARE_LOCK:
+                    self._pid(self._bio, setpoint=self.setpoint, current_temp=temp, **self.gains)
+
+    def _advance_track(self, i: int, now: float):
+        ts = self._track_state[i]
+        if ts['state'] in ('done', 'hold'):
+            return  # 'done' = finished; 'hold' = open-ended step, stays active forever
+        if ts['seg_end'] is not None and now < ts['seg_end']:
+            return  # still holding the current step
+        track = self.program.tracks[i]
+        ts['idx'] += 1
+        if ts['idx'] >= len(track.steps):
+            if track.repeat:
+                ts['idx'] = 0
+            else:
+                ts['state'] = 'done'          # finished its last finite step
+                self._end_track_device(track.device)
+                return
+        step = track.steps[ts['idx']]
+        ts['step'] = step
+        self._apply_step(step)
+        self._overrides.discard(step.device)  # schedule reclaims the device
+        if step.duration_s is None:
+            ts['seg_end'] = None
+            ts['state'] = 'hold'              # hold-to-end: stays active (PID keeps running)
+        else:
+            ts['seg_end'] = now + step.duration_s
+            ts['state'] = 'run'
+
+    def _apply_step(self, step):
+        self._applied[step.device] = {'command': step.command, 'value': step.value}
+        if step.command == 'temp':
+            self.setpoint = float(step.value)     # PID drives toward this each tick
+            return
+        self.setpoint = None if step.device == 'peltier' else self.setpoint
+        if step.command == 'heater':
+            v = float(step.value)
+            self._apply_peltier(abs(v), 'heat' if v >= 0 else 'cool')
+        elif step.command == 'ring':
+            color = tuple(int(x) for x in step.value)
+            if self._ring_apply_fn:
+                self._ring_apply_fn(color)          # handles sim/real + /api/state shadow
+            elif self._sim:
+                self._sim_state['ring'] = color
+            elif self._io is not None:
+                with HARDWARE_LOCK:
+                    self._io.set_ring_light(self._bio, color)
+        elif step.command == 'stirrer':
+            duty = float(step.value)
+            if self._stirrer_apply_fn:
+                self._stirrer_apply_fn(duty)
+            elif self._sim:
+                self._sim_state['stirrer'] = duty
+            elif self._io is not None:
+                with HARDWARE_LOCK:
+                    self._io.set_stirrer_speed(self._bio, duty)
+
+    def _end_track_device(self, device: str):
+        # A non-repeating track ran out of steps: release the device. The peltier is
+        # turned OFF for safety; ring/stirrer keep their last value (freely manual now).
+        if device == 'peltier':
+            self.setpoint = None
+            self._all_off()
+
+    def _program_finished(self, now: float) -> bool:
+        if self.program_end is not None:
+            return now >= self.program_end
+        return all(ts['state'] == 'done' for ts in self._track_state)
 
     def _advance_schedule(self):
         now = time.time()
@@ -548,6 +687,25 @@ class HeaterController:
             if self.mode == 'pid':
                 st['setpoint'] = self.setpoint
                 st['gains'] = self.gains
+            if self.mode == 'program' and self.program is not None:
+                st['program_name'] = self.program.name
+                st['setpoint'] = self.setpoint
+                st['overrides'] = sorted(self._overrides)
+                if self.program_end is not None and self.active:
+                    st['remaining_s'] = round(self.program_end - time.time(), 1)
+                tracks = []
+                for i, ts in enumerate(self._track_state):
+                    tr = self.program.tracks[i]
+                    step = ts.get('step')
+                    tracks.append({
+                        'name': tr.name, 'device': tr.device, 'state': ts['state'],
+                        'repeat': tr.repeat, 'total_steps': len(tr.steps),
+                        'step': (ts['idx'] % len(tr.steps)) + 1 if ts['idx'] >= 0 else 0,
+                        'current': ({'command': step.command, 'value': step.value} if step else None),
+                        'step_remaining_s': (round(ts['seg_end'] - time.time(), 1)
+                                             if ts['seg_end'] is not None and self.active else None),
+                    })
+                st['tracks'] = tracks
             return st
 
 
