@@ -173,6 +173,8 @@ class HeaterController:
         self._retention_keep = 10        # always keep at least this many newest runs
         self._min_free_mb = 500          # refuse to start a run below this free space
         self._od_power_fn = None         # callable -> live IR LED % for the per-tick OD read
+        self._od_latest_fn = None        # callable -> cached OD dict (from the OD sampler)
+        self._gas_latest_fn = None       # callable -> cached {'co2','o2'} (from the gas sampler)
 
         self._reset_state()
 
@@ -180,7 +182,7 @@ class HeaterController:
     def configure(self, *, bio, sim, sim_state, io_module, pid_func, measure_func,
                   data_dir, max_heat, max_cool,
                   retention_max_mb=1000, retention_keep=10, min_free_mb=500,
-                  od_power_fn=None):
+                  od_power_fn=None, od_latest_fn=None, gas_latest_fn=None):
         with self._lock:
             self._bio = bio
             self._sim = sim
@@ -195,6 +197,8 @@ class HeaterController:
             self._retention_keep = retention_keep
             self._min_free_mb = min_free_mb
             self._od_power_fn = od_power_fn
+            self._od_latest_fn = od_latest_fn
+            self._gas_latest_fn = gas_latest_fn
 
     def prune(self):
         """Prune old run files now (e.g. on startup). No-op in simulation."""
@@ -455,12 +459,19 @@ class HeaterController:
             return
 
         elapsed = time.time() - self.run_t0
+        # Pull the slow sensors (OD, CO2, O2) from the background samplers' caches so the
+        # control tick doesn't do their ~1.5s reads under the lock. Fetch OUTSIDE the lock
+        # (the getters take the samplers' own locks) to avoid a lock-ordering inversion.
+        od_cache = self._od_latest_fn() if self._od_latest_fn else None
+        gas_cache = (self._gas_latest_fn() if self._gas_latest_fn else None) or {}
+        led_power = self._od_power_fn() if self._od_power_fn else 10.0
         try:
             with HARDWARE_LOCK:
-                # Illuminate the per-tick OD read at the same (live) power the frontend
-                # OD sampler uses, so run-CSV OD lines up with the live plot / 24h buffer.
-                led_power = self._od_power_fn() if self._od_power_fn else 10.0
-                data = self._measure(self._bio, elapsed=elapsed, led_power=led_power)
+                data = self._measure(self._bio, elapsed=elapsed, led_power=led_power,
+                                     od_override=od_cache,
+                                     co2_override=gas_cache.get('co2'),
+                                     o2_override=gas_cache.get('o2'),
+                                     use_cached=True)
         except Exception as e:
             logger.error("measure_and_record_sensors failed: %s", e)
             data = {}
