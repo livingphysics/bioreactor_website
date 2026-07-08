@@ -136,14 +136,22 @@ class Config:
         },
     }
 
-    # CO2 Sensor
+    # CO2 Sensor (Atlas Scientific EZO-CO2, reads ppm)
     CO2_SENSOR_TYPE: str = 'atlas_i2c'
-    CO2_SENSOR_I2C_ADDRESS: Optional[int] = None
+    CO2_SENSOR_I2C_ADDRESS: Optional[int] = 0x69   # verified on the bus
     CO2_SENSOR_I2C_BUS: int = 1
 
-    # O2 Sensor (Atlas Scientific)
-    O2_SENSOR_I2C_ADDRESS: Optional[int] = None
+    # O2 Sensor (Atlas Scientific EZO-O2, reads %)
+    O2_SENSOR_I2C_ADDRESS: Optional[int] = 0x6C    # verified on the bus
     O2_SENSOR_I2C_BUS: int = 1
+
+    # Atlas gas sampler (gas_sampler.py): a background thread reads CO2 + O2 every
+    # GAS_SAMPLE_PERIOD_S and caches the latest for /api/state and the history buffer.
+    # Each Atlas "R" read needs a ~GAS_READ_DELAY_MS processing wait; the I2C lock is
+    # released during that wait (write -> sleep -> read) so the slow sensors don't
+    # starve the bus. Reads are slow, so poll gently — the gases change slowly anyway.
+    GAS_SAMPLE_PERIOD_S: float = 5.0
+    GAS_READ_DELAY_MS: int = 1500
 
     # Ambient Temperature Sensor (NXP PCT2075, I2C) — reads in °C
     AMBIENT_TEMP_I2C_ADDRESS: int = 0x37
