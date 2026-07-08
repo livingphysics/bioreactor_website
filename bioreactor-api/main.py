@@ -490,6 +490,7 @@ async def state(request: Request):
         "od_sampling": od_sampler.status() if (od_available['od'] or od_available['eyespy']) else None,
         "led": {"power": led_power, "active": led_power > 0} if initialized_components.get('led') else None,
         "ring": {**ring_color, "active": any(ring_color.values())} if initialized_components.get('ring_light') else None,
+        "stirrer": _stirrer_state(),
     }
 
 
@@ -613,7 +614,7 @@ async def stirrer_state(request: Request):
         d = sim_state['stirrer_duty']
         return StirrerState(status="success", duty_cycle=d, active=d > 0)
     driver = getattr(bioreactor, 'stirrer_driver', None)
-    duty = getattr(driver, '_last_duty', 0.0) if driver else 0.0
+    duty = getattr(driver, '_duty', 0.0) if driver else 0.0
     return StirrerState(status="success", duty_cycle=duty, active=duty > 0)
 
 
@@ -1151,6 +1152,18 @@ def _read_od():
     no OD source / sampling disabled). The gated measurement (LED on -> read -> off)
     happens on the od_sampler thread, not here."""
     return od_sampler.latest()
+
+
+def _stirrer_state():
+    """Current stirrer duty for /api/state ({'duty','active'} or None)."""
+    if not initialized_components.get('stirrer'):
+        return None
+    if simulation_mode:
+        d = float(sim_state.get('stirrer_duty', 0.0))
+    else:
+        driver = getattr(bioreactor, 'stirrer_driver', None)
+        d = float(getattr(driver, '_duty', 0.0)) if driver is not None else 0.0
+    return {"duty": round(d, 1), "active": d > 0}
 
 
 def _ring_dodge(active):
