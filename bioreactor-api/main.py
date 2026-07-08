@@ -25,7 +25,7 @@ import camera
 from auth import verify_token, limiter, RATE_LIMIT
 from control import (heater, parse_schedule, ScheduleError, HARDWARE_LOCK,
                      InsufficientStorageError, TEMP_MIN_C, TEMP_MAX_C)
-from program import parse_program, ProgramError
+from program import parse_program, ProgramError, expand_tracks
 from history import history
 from od_sampler import od_sampler
 from gas_sampler import gas_sampler
@@ -933,6 +933,23 @@ async def heater_program(request: Request):
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
     return {"status": "success", "mode": "program", **heater.status()}
+
+
+@app.post("/api/heater/program/preview")
+@limiter.limit(RATE_LIMIT)
+async def heater_program_preview(request: Request):
+    """Validate a program and return its per-track segment timeline for a preview.
+    Doesn't run anything. Returns {valid:false, error} (200) on a bad program so the
+    editor can show it inline."""
+    raw = await request.body()
+    limits = {'max_heat': heater.max_heat, 'max_cool': heater.max_cool,
+              'temp_min': TEMP_MIN_C, 'temp_max': TEMP_MAX_C}
+    try:
+        prog = parse_program(raw.decode('utf-8'), limits=limits)
+    except (UnicodeDecodeError, ProgramError) as e:
+        return {"valid": False, "error": str(e)}
+    return {"valid": True, "name": prog.name, "duration_s": prog.duration_s,
+            **expand_tracks(prog)}
 
 
 @app.post("/api/heater/stop")

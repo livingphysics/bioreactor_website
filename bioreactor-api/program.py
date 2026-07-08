@@ -265,3 +265,47 @@ def expand(program: Program, max_events: int = 500) -> List[Dict[str, Any]]:
                     break
     events.sort(key=lambda e: e['t'])
     return events
+
+
+def preview_extent(program) -> float:
+    """The time span to draw a preview over: the program duration, or (if none) the
+    longest track's one-pass finite length."""
+    if program.duration_s is not None:
+        return program.duration_s
+    spans = [sum(s.duration_s for s in t.steps if s.duration_s is not None)
+             for t in program.tracks]
+    return max(spans, default=0.0) or 3600.0
+
+
+def expand_tracks(program, max_segments: int = 400):
+    """Per-track segment timeline for a preview:
+      [{name, device, repeat, segments: [{start, end, command, value}]}]
+    Times in seconds, clipped to preview_extent(); repeat tracks fill it and
+    open-ended (hold) steps extend to it."""
+    extent = preview_extent(program)
+    out = []
+    for track in program.tracks:
+        segs = []
+        t = 0.0
+        idx = 0
+        count = 0
+        while count < max_segments and t < extent:
+            step = track.steps[idx]
+            if step.duration_s is None:                 # hold to end
+                segs.append({'start': round(t, 3), 'end': round(extent, 3),
+                             'command': step.command, 'value': step.value})
+                break
+            seg_end = min(t + step.duration_s, extent)
+            segs.append({'start': round(t, 3), 'end': round(seg_end, 3),
+                         'command': step.command, 'value': step.value})
+            count += 1
+            t += step.duration_s
+            idx += 1
+            if idx >= len(track.steps):
+                if track.repeat:
+                    idx = 0
+                else:
+                    break
+        out.append({'name': track.name, 'device': track.device,
+                    'repeat': track.repeat, 'segments': segs})
+    return {'extent_s': round(extent, 3), 'tracks': out}
