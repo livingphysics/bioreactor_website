@@ -294,6 +294,7 @@ async def lifespan(app: FastAPI):
     # interleaving OD/eyespy when both are present. Its latest reading feeds /api/state
     # and the history buffer (via _read_od). Started before history so OD is available.
     if od_available['od'] or od_available['eyespy']:
+        od_ring_refresh = None
         if simulation_mode:
             od_set_led, od_read_fns = (lambda p: None), {}
         else:
@@ -304,6 +305,10 @@ async def lifespan(app: FastAPI):
             od_set_led = lambda p: _od_set_led(bioreactor, p)
             od_read_fns = {'od': lambda ch: _od_rv(bioreactor, ch),
                            'eyespy': lambda b: _od_rev(bioreactor, b)}
+            # Re-assert the ring colour after each IR pulse — the LED PWM couples SPI
+            # noise into the Neopixel data line and can flip a pixel on.
+            if initialized_components.get('ring_light'):
+                od_ring_refresh = _refresh_ring
         od_sampler.configure(
             hw_lock=HARDWARE_LOCK, set_led=od_set_led, read_fns=od_read_fns,
             sources=[('od', od_channels['od']), ('eyespy', od_channels['eyespy'])],
@@ -313,6 +318,7 @@ async def lifespan(app: FastAPI):
             settle_s=getattr(config, 'OD_SETTLE_S', 0.5),
             post_read_s=getattr(config, 'OD_POST_READ_S', 0.1),
             period_s=getattr(config, 'OD_PULSE_PERIOD_S', 1.0),
+            ring_refresh=od_ring_refresh,
         )
         od_sampler.start()
 
@@ -1050,6 +1056,14 @@ def _read_od():
     no OD source / sampling disabled). The gated measurement (LED on -> read -> off)
     happens on the od_sampler thread, not here."""
     return od_sampler.latest()
+
+
+def _refresh_ring():
+    """Re-assert the ring's commanded colour to correct SPI-noise glitches from the
+    IR-LED PWM. Called by the OD sampler after each pulse (already under HARDWARE_LOCK)."""
+    driver = getattr(bioreactor, 'ring_light_driver', None)
+    if driver is not None:
+        driver.refresh()
 
 
 def _get_config():
