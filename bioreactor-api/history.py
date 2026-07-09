@@ -2,7 +2,8 @@
 Rolling sensor-history buffer + long-term daily archive for the bioreactor API.
 
 A background thread samples the monitor signals (bath temp, ambient temp, signed
-peltier current, and the OD channels when sampling is on) every `interval_s`.
+peltier current, gas, OD channels) plus actuator/control state (signed peltier duty,
+ring RGB, stirrer duty, IR-LED power, active setpoint) every `interval_s`.
 
 Two layers:
   * In-memory ring buffer — the last `window_s` seconds (default 24h). This is what
@@ -122,6 +123,17 @@ class HistoryBuffer:
             "co2": _num(data.get("co2")),         # ppm (int)
             "o2": _num(data.get("o2"), 2),        # % (2 dp)
         }
+        # Actuator + control state. Added only when present, so points stay compact and
+        # pre-existing archive lines (which lack these keys) stay valid — consumers treat
+        # a missing key as null. pduty is signed: + cooling, - heating (like current).
+        for key, src, nd in (("pduty", "peltier_duty", 1), ("stir", "stirrer", 1),
+                             ("ir", "ir_power", 1), ("setpoint", "setpoint", 2)):
+            v = _num(data.get(src), nd)
+            if v is not None:
+                pt[key] = v
+        ring = data.get("ring")
+        if isinstance(ring, (list, tuple)) and len(ring) == 3:
+            pt["ring"] = [int(ring[0]), int(ring[1]), int(ring[2])]
         od = data.get("od")
         if isinstance(od, dict):
             pt["od"] = {k: _num(v, 5) for k, v in od.items()}   # truncate ADC readings

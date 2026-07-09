@@ -1114,15 +1114,31 @@ async def camera_snapshot(request: Request,
 # Helper
 # ---------------------------------------------------------------------------
 
-def _read_signals():
-    """Read the three monitor signals (bath temp, ambient, signed peltier current).
+def _actuator_signals():
+    """Ring RGB / stirrer duty / IR-LED power / active temperature setpoint for the
+    history sampler. All come from shadows or the control lock, so this MUST be called
+    OUTSIDE HARDWARE_LOCK to avoid lock-order inversion with the control thread."""
+    stir = _stirrer_state()
+    return {
+        "ring": ([ring_color['red'], ring_color['green'], ring_color['blue']]
+                 if initialized_components.get('ring_light') else None),
+        "stirrer": stir['duty'] if stir else None,
+        "ir_power": od_sampler.led_power if initialized_components.get('led') else None,
+        "setpoint": heater.status().get('setpoint'),   # None unless a PID/program targets a temp
+    }
 
-    Used by the history sampler thread; guarded by HARDWARE_LOCK in real mode.
-    Returns a dict with keys temperature / ambient_temp / peltier_current (None if
-    a component is unavailable or the read fails).
+
+def _read_signals():
+    """Monitor signals for the history sampler: bath temp, ambient, signed peltier
+    current, gas (co2/o2), OD, plus actuator/control state (signed peltier duty, ring,
+    stirrer, IR-LED power, setpoint). Sensor reads are guarded by HARDWARE_LOCK in real
+    mode; actuator state is read outside it. Missing components report None.
     """
     if simulation_mode:
         _gas = gas_sampler.latest()
+        _pdir = sim_state.get('peltier_direction', 'cool')
+        _pd = sim_state.get('peltier_duty', 0.0)
+        pduty = (_pd if _pdir == 'cool' else -_pd) if initialized_components.get('peltier_driver') else None
         return {
             "temperature": round(36.5 + random.uniform(-0.5, 0.5), 2) if initialized_components.get('temp_sensor') else None,
             "ambient_temp": round(22.0 + random.uniform(-1.0, 1.0), 2) if initialized_components.get('ambient_temp') else None,
@@ -1130,6 +1146,8 @@ def _read_signals():
             "co2": _gas.get('co2') if initialized_components.get('co2_sensor') else None,
             "o2": _gas.get('o2') if initialized_components.get('o2_sensor') else None,
             "od": _read_od(),
+            "peltier_duty": pduty,
+            **_actuator_signals(),
         }
     from bioreactor_v3.src.io import (
         get_temperature, read_ambient_temp, read_peltier_current, get_peltier_state,
@@ -1151,17 +1169,21 @@ def _read_signals():
         ambient = _rd('ambient_temp', lambda: read_ambient_temp(bioreactor))
         current = _rd('peltier_current', lambda: read_peltier_current(bioreactor))
         forward = True
+        pduty = None
         if initialized_components.get('peltier_driver'):
             ps = get_peltier_state(bioreactor)
             if ps is not None:
-                _, forward = ps
+                duty_val, forward = ps
+                pduty = duty_val if forward else -duty_val   # + cool, - heat (matches signed current)
     if current is not None and not forward:
         current = -current   # sign negative when heating, matching /api/state
     _gas = gas_sampler.latest()
     return {"temperature": temp, "ambient_temp": ambient, "peltier_current": current,
             "co2": _gas.get('co2') if initialized_components.get('co2_sensor') else None,
             "o2": _gas.get('o2') if initialized_components.get('o2_sensor') else None,
-            "od": _read_od()}
+            "od": _read_od(),
+            "peltier_duty": pduty,
+            **_actuator_signals()}
 
 
 def _read_od():
