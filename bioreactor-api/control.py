@@ -1,5 +1,5 @@
 """
-Heater control engine for the bioreactor API.
+Run control engine for the bioreactor API.
 
 Runs a background control loop (1 Hz) that drives the peltier either by stepping
 through an uploaded schedule (`duty,direction,hold_s` CSV) or by holding a PID
@@ -151,8 +151,8 @@ def parse_schedule(text: str, max_heat: float = 70.0, max_cool: float = 100.0) -
     return steps
 
 
-class HeaterController:
-    """Single background control loop for schedule / PID heater runs.
+class RunController:
+    """Single background control loop for schedule / PID / program runs.
 
     Thread-safe: `start_*`, `stop`, and `status` may be called from FastAPI
     request threads; the control loop runs on its own daemon thread. All shared
@@ -295,7 +295,7 @@ class HeaterController:
         with self._lifecycle:
             with self._lock:
                 if self.active:
-                    raise RuntimeError("a heater run is already active")
+                    raise RuntimeError("a run is already active")
             # prune + disk guard before marking active (may raise InsufficientStorageError)
             self._prepare_storage()
             with self._lock:
@@ -310,7 +310,7 @@ class HeaterController:
         with self._lifecycle:
             with self._lock:
                 if self.active:
-                    raise RuntimeError("a heater run is already active")
+                    raise RuntimeError("a run is already active")
             self._prepare_storage()
             with self._lock:
                 self._reset_state()
@@ -332,7 +332,7 @@ class HeaterController:
         with self._lifecycle:
             with self._lock:
                 if self.active:
-                    raise RuntimeError("a heater run is already active")
+                    raise RuntimeError("a run is already active")
             self._prepare_storage()
             with self._lock:
                 self._reset_state()
@@ -376,9 +376,9 @@ class HeaterController:
         self.aborted = False
         self.abort_reason = None
         self._stop_evt.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True, name="heater-control")
+        self._thread = threading.Thread(target=self._run, daemon=True, name="run-control")
         self._thread.start()
-        logger.info("Heater run started: mode=%s", self.mode)
+        logger.info("Run started: mode=%s", self.mode)
 
     def stop(self, reason: Optional[str] = None) -> dict:
         """Stop any active run and turn the peltier off. Safe to call when idle.
@@ -407,7 +407,7 @@ class HeaterController:
             if not self._sim:
                 self._close_data_file()
             if was_active:
-                logger.info("Heater run stopped%s", f" ({reason})" if reason else "")
+                logger.info("Run stopped%s", f" ({reason})" if reason else "")
         return self.status()
 
     # ---------------------------------------------------------------- data IO
@@ -479,7 +479,7 @@ class HeaterController:
                 # Fail safe: an unexpected error must not leave the peltier driven.
                 # Cut power immediately, and abort the run if errors persist so a
                 # wedged bus can't hold the heater on while the loop retries.
-                logger.error("Heater control tick error: %s", e, exc_info=True)
+                logger.error("Run control tick error: %s", e, exc_info=True)
                 self._all_off()
                 self.tick_errors += 1
                 if self.tick_errors >= MAX_NAN_SAMPLES:
@@ -700,7 +700,7 @@ class HeaterController:
         if abort:
             self.aborted = True
             self.abort_reason = abort
-            logger.warning("Heater run aborted: %s", abort)
+            logger.warning("Run aborted: %s", abort)
         self._stop_evt.set()
         self._all_off()
         if self.mode == 'program' and self._pump_stop_fn:
@@ -759,4 +759,4 @@ class HeaterController:
 
 
 # Module-level singleton used by main.py
-heater = HeaterController()
+runner = RunController()
