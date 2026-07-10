@@ -34,7 +34,9 @@ from pump_controller import pump_controller
 # Rolling sensor-history: legacy single-file buffer (migrated once on first boot of
 # the daily-archive version) + the daily-archive directory (history/YYYY-MM-DD.jsonl).
 HISTORY_FILE = Path(__file__).parent / 'sensor_history.json'
-HISTORY_DIR = Path(__file__).parent / 'history'
+# Archive dir is env-overridable so a simulation/test instance can point at a scratch
+# path and never append fake points to the production archive (set BIOREACTOR_HISTORY_DIR).
+HISTORY_DIR = Path(os.getenv('BIOREACTOR_HISTORY_DIR') or (Path(__file__).parent / 'history'))
 
 # Directory where the bioreactor writes its data CSVs (run files live here).
 DATA_DIR = Path(__file__).parent / 'bioreactor_v3' / 'src' / 'bioreactor_data'
@@ -730,6 +732,17 @@ async def pumps_run(request: Request, req: PumpRunRequest):
     require_component('pumps')
     pump_controller.set_regime(req.duration, req.duty_cycle, req.flow_rate)
     heater.note_override('pump')   # a program's pump track yields to this until its next step
+    return {"status": "success", **pump_controller.status()}
+
+
+@app.post("/api/pumps/dose")
+@limiter.limit(RATE_LIMIT)
+async def pumps_dose(request: Request, req: PumpRunRequest):
+    """Run a SINGLE dose — outflow for duration*duty, inflow for 0.95*duration*duty
+    (duty 0-100%) — then stop. Same body as /run; doesn't repeat."""
+    require_component('pumps')
+    pump_controller.dose(req.duration, req.duty_cycle, req.flow_rate)
+    heater.note_override('pump')
     return {"status": "success", **pump_controller.status()}
 
 
