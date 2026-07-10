@@ -19,6 +19,10 @@ import threading
 logger = logging.getLogger(__name__)
 
 
+class RelaySafetyError(Exception):
+    """A guarded relay refused a dose (rate limit / CO2 too high)."""
+
+
 class RelayController:
     _CMD_ENERGIZED = {'open': False, 'closed': True}   # command -> driver state
     COMMANDS = ('open', 'closed', 'toggle')
@@ -29,11 +33,16 @@ class RelayController:
         self._get_fn = None        # get_fn() -> {name: energized bool}
         self._names = []
         self._timers = {}          # name -> (Timer, fire_at_epoch)
+        self._guards = {}          # name -> {max_duration_s, min_interval_s, co2_max_ppm}
+        self._co2_fn = None        # () -> current CO2 ppm (or None)
+        self._last_dose = {}       # name -> epoch of last dose
 
-    def configure(self, *, set_fn, get_fn, names):
+    def configure(self, *, set_fn, get_fn, names, guards=None, co2_fn=None):
         self._set_fn = set_fn
         self._get_fn = get_fn
         self._names = list(names)
+        self._guards = {k: v for k, v in (guards or {}).items() if k in self._names}
+        self._co2_fn = co2_fn
 
     # ----------------------------------------------------------------- helpers
     def _energized(self, name) -> bool:
@@ -46,24 +55,34 @@ class RelayController:
             entry[0].cancel()
 
     # --------------------------------------------------------------------- API
+    def _target(self, name, command) -> bool:
+        if command == 'toggle':
+            return not self._energized(name)
+        if command in self._CMD_ENERGIZED:
+            return self._CMD_ENERGIZED[command]
+        raise ValueError(f"bad relay command {command!r} (use {'/'.join(self.COMMANDS)})")
+
     def apply(self, name, command) -> str:
         """Run one command ('open'|'closed'|'toggle'). Supersedes any pending timed
-        toggle on that relay. Returns the new state string ('open'|'closed')."""
+        toggle. Returns the new state string. Closing a guarded relay is a dose."""
         if name not in self._names:
             raise KeyError(name)
-        self._cancel_timer(name)          # a fresh command wins over a scheduled toggle
-        if command == 'toggle':
-            target = not self._energized(name)
-        elif command in self._CMD_ENERGIZED:
-            target = self._CMD_ENERGIZED[command]
-        else:
-            raise ValueError(f"bad relay command {command!r} (use {'/'.join(self.COMMANDS)})")
+        target = self._target(name, command)
+        if target and name in self._guards:      # closing a guarded relay = a dose
+            return self._dose(name)              # manages its own timer; raises (untouched) if blocked
+        self._cancel_timer(name)                 # a fresh command wins over a scheduled toggle/dose
         self._set_fn(name, target)
         return 'closed' if target else 'open'
 
     def timed(self, name, command, duration_s) -> str:
-        """command-wait-toggle: run `command` now, then toggle after `duration_s`."""
-        state = self.apply(name, command)     # also cancels any prior timer
+        """command-wait-toggle: run `command` now, then toggle after `duration_s`. For a
+        guarded relay, closing is a single auto-reverting dose capped at max_duration_s."""
+        if name not in self._names:
+            raise KeyError(name)
+        target = self._target(name, command)
+        if target and name in self._guards:
+            return self._dose(name, requested=float(duration_s))
+        state = self.apply(name, command)     # cancels any prior timer
         duration_s = float(duration_s)
         if duration_s > 0:
             t = threading.Timer(duration_s, self._fire_toggle, args=(name,))
@@ -72,6 +91,48 @@ class RelayController:
                 self._timers[name] = (t, time.time() + duration_s)
             t.start()
         return state
+
+    # ------------------------------------------------------------ safety-guarded dose
+    def _dose(self, name, requested=None) -> str:
+        """Close a guarded relay as a rate-limited, CO2-gated, auto-reverting dose.
+        Raises RelaySafetyError if refused."""
+        g = self._guards[name]
+        cap = g.get('co2_max_ppm')
+        if cap is not None:
+            co2 = None
+            try:
+                co2 = self._co2_fn() if self._co2_fn else None
+            except Exception:
+                co2 = None
+            if co2 is None or co2 > cap:
+                raise RelaySafetyError(
+                    f"{name} dose blocked: CO2 "
+                    f"{'unknown' if co2 is None else f'{co2:.0f} ppm'} (limit {cap} ppm)")
+        now = time.time()
+        interval = g.get('min_interval_s', 0.0)
+        wait = interval - (now - self._last_dose.get(name, -1e12))
+        if wait > 0:
+            raise RelaySafetyError(f"{name}: one dose per {interval:.0f}s — wait {wait:.0f}s")
+        maxd = float(g.get('max_duration_s', 1.0))
+        dur = maxd if not requested else max(0.05, min(float(requested), maxd))
+        self._last_dose[name] = now
+        self._cancel_timer(name)
+        self._set_fn(name, True)                      # dose ON (closed)
+        t = threading.Timer(dur, self._end_dose, args=(name,))
+        t.daemon = True
+        with self._lock:
+            self._timers[name] = (t, now + dur)
+        t.start()
+        logger.info("%s dose: closed for %.2fs", name, dur)
+        return 'closed'
+
+    def _end_dose(self, name):
+        with self._lock:
+            self._timers.pop(name, None)
+        try:
+            self._set_fn(name, False)                 # auto-revert to open
+        except Exception as e:
+            logger.error("%s dose-end failed: %s", name, e)
 
     def _fire_toggle(self, name):
         with self._lock:
@@ -90,7 +151,19 @@ class RelayController:
         now = time.time()
         with self._lock:
             pending = {n: round(max(0.0, fire_at - now), 1) for n, (_, fire_at) in self._timers.items()}
-        return {'states': self.states(), 'pending': pending}
+        out = {'states': self.states(), 'pending': pending}
+        if self._guards:
+            out['guards'] = {}
+            for n, g in self._guards.items():
+                last = self._last_dose.get(n)
+                cooldown = max(0.0, g.get('min_interval_s', 0.0) - (now - last)) if last else 0.0
+                out['guards'][n] = {
+                    'max_duration_s': g.get('max_duration_s'),
+                    'min_interval_s': g.get('min_interval_s'),
+                    'co2_max_ppm': g.get('co2_max_ppm'),
+                    'cooldown_s': round(cooldown, 1),
+                }
+        return out
 
     def stop(self):
         with self._lock:

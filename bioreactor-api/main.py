@@ -30,7 +30,7 @@ from history import history
 from od_sampler import od_sampler
 from gas_sampler import gas_sampler
 from pump_controller import pump_controller
-from relay_controller import relay_controller
+from relay_controller import relay_controller, RelaySafetyError
 
 # Rolling sensor-history: legacy single-file buffer (migrated once on first boot of
 # the daily-archive version) + the daily-archive directory (history/YYYY-MM-DD.jsonl).
@@ -147,6 +147,7 @@ class RelayState(BaseModel):
     status: str
     states: Dict[str, str]                    # name -> 'open' | 'closed'
     pending: Dict[str, float] = {}            # name -> seconds left on a timed toggle
+    guards: Dict[str, Any] = {}               # name -> safety limits + cooldown (guarded relays)
 
 # -- Sensors (response only)
 class TemperatureState(BaseModel):
@@ -261,7 +262,7 @@ async def lifespan(app: FastAPI):
                 stirrer_apply_fn=_program_apply_stirrer,        # program stirrer cmd
                 pump_apply_fn=lambda interval, duty, rate=None: pump_controller.set_regime(interval, duty, rate),
                 pump_stop_fn=pump_controller.off,
-                relay_apply_fn=lambda name, state: relay_controller.apply(name, state),
+                relay_apply_fn=_program_apply_relay,
             )
             heater.prune()  # trim old run files on startup
         except Exception as e:
@@ -284,7 +285,7 @@ async def lifespan(app: FastAPI):
             max_heat=70.0, max_cool=100.0,
             pump_apply_fn=lambda interval, duty, rate=None: pump_controller.set_regime(interval, duty, rate),
             pump_stop_fn=pump_controller.off,
-            relay_apply_fn=lambda name, state: relay_controller.apply(name, state),
+            relay_apply_fn=_program_apply_relay,
         )
 
     # Optical-density sources available (from config.py via what actually initialized).
@@ -424,7 +425,11 @@ async def lifespan(app: FastAPI):
             def _relay_get():
                 with HARDWARE_LOCK:
                     return get_all_relay_states(bioreactor)
-        relay_controller.configure(set_fn=_relay_set, get_fn=_relay_get, names=_relay_names)
+        relay_controller.configure(
+            set_fn=_relay_set, get_fn=_relay_get, names=_relay_names,
+            guards=getattr(config, 'RELAY_SAFETY', {}),
+            co2_fn=lambda: gas_sampler.latest().get('co2'),   # for the CO2-gated dose guard
+        )
         # Add relay columns to the run CSV: measure_and_record_sensors already writes
         # each relay's state into the row, but only if the name is in bioreactor.fieldnames.
         if not simulation_mode and bioreactor is not None and hasattr(bioreactor, 'fieldnames'):
@@ -815,6 +820,8 @@ async def relays_control(request: Request, req: RelayControlRequest):
         relay_controller.apply(req.relay_name, req.command)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"no relay named '{req.relay_name}'")
+    except RelaySafetyError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     heater.note_override(f"relay:{req.relay_name}")
@@ -830,6 +837,8 @@ async def relays_timed(request: Request, req: RelayTimedRequest):
         relay_controller.timed(req.relay_name, req.command, req.duration)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"no relay named '{req.relay_name}'")
+    except RelaySafetyError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     heater.note_override(f"relay:{req.relay_name}")
@@ -1381,6 +1390,15 @@ def _program_apply_stirrer(duty):
         from bioreactor_v3.src.io import set_stirrer_speed
         with HARDWARE_LOCK:
             set_stirrer_speed(bioreactor, d)
+
+
+def _program_apply_relay(name, state):
+    """Apply a program track's relay command. A safety-guarded relay's dose may be
+    refused (rate limit / CO2) — log and carry on rather than crash the control tick."""
+    try:
+        relay_controller.apply(name, state)
+    except RelaySafetyError as e:
+        logger.warning("program relay %s -> %s blocked: %s", name, state, e)
 
 
 def _get_config():
