@@ -180,6 +180,7 @@ class HeaterController:
         self._stirrer_apply_fn = None    # callable(duty)  -> apply program stirrer command
         self._pump_apply_fn = None       # callable(interval_s, duty) -> set pump dosing regime
         self._pump_stop_fn = None        # callable() -> stop pump dosing
+        self._relay_apply_fn = None      # callable(name, 'open'|'closed') -> set a relay
 
         self._reset_state()
 
@@ -189,7 +190,7 @@ class HeaterController:
                   retention_max_mb=1000, retention_keep=10, min_free_mb=500,
                   od_power_fn=None, od_latest_fn=None, gas_latest_fn=None,
                   ring_apply_fn=None, stirrer_apply_fn=None,
-                  pump_apply_fn=None, pump_stop_fn=None):
+                  pump_apply_fn=None, pump_stop_fn=None, relay_apply_fn=None):
         with self._lock:
             self._bio = bio
             self._sim = sim
@@ -210,6 +211,7 @@ class HeaterController:
             self._stirrer_apply_fn = stirrer_apply_fn
             self._pump_apply_fn = pump_apply_fn
             self._pump_stop_fn = pump_stop_fn
+            self._relay_apply_fn = relay_apply_fn
 
     def prune(self):
         """Prune old run files now (e.g. on startup). No-op in simulation."""
@@ -573,6 +575,10 @@ class HeaterController:
             v = step.value                        # {'duty': 0-100, 'interval': seconds, 'rate'?: ml/s}
             if self._pump_apply_fn:
                 self._pump_apply_fn(v['interval'], v['duty'], v.get('rate'))
+        elif step.command == 'relay':
+            v = step.value                        # {'name': <relay>, 'state': 'open'|'closed'}
+            if self._relay_apply_fn:
+                self._relay_apply_fn(v['name'], v['state'])
 
     def _end_track_device(self, device: str):
         # A non-repeating track ran out of steps: release the device. The peltier is

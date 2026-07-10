@@ -30,6 +30,7 @@ from history import history
 from od_sampler import od_sampler
 from gas_sampler import gas_sampler
 from pump_controller import pump_controller
+from relay_controller import relay_controller
 
 # Rolling sensor-history: legacy single-file buffer (migrated once on first boot of
 # the daily-archive version) + the daily-archive directory (history/YYYY-MM-DD.jsonl).
@@ -134,12 +135,18 @@ class PumpRunRequest(BaseModel):
 
 # -- Relays
 class RelayControlRequest(BaseModel):
+    relay_name: str = Field(description="Relay identifier (name from config.RELAYS)")
+    command: str = Field(description="open | closed | toggle")
+
+class RelayTimedRequest(BaseModel):
     relay_name: str = Field(description="Relay identifier")
-    state: bool = Field(description="True=on, False=off")
+    command: str = Field(description="open | closed | toggle — run now, then toggle after duration")
+    duration: float = Field(gt=0, description="seconds to wait before the toggle")
 
 class RelayState(BaseModel):
     status: str
-    states: Dict[str, bool]
+    states: Dict[str, str]                    # name -> 'open' | 'closed'
+    pending: Dict[str, float] = {}            # name -> seconds left on a timed toggle
 
 # -- Sensors (response only)
 class TemperatureState(BaseModel):
@@ -254,6 +261,7 @@ async def lifespan(app: FastAPI):
                 stirrer_apply_fn=_program_apply_stirrer,        # program stirrer cmd
                 pump_apply_fn=lambda interval, duty, rate=None: pump_controller.set_regime(interval, duty, rate),
                 pump_stop_fn=pump_controller.off,
+                relay_apply_fn=lambda name, state: relay_controller.apply(name, state),
             )
             heater.prune()  # trim old run files on startup
         except Exception as e:
@@ -276,6 +284,7 @@ async def lifespan(app: FastAPI):
             max_heat=70.0, max_cool=100.0,
             pump_apply_fn=lambda interval, duty, rate=None: pump_controller.set_regime(interval, duty, rate),
             pump_stop_fn=pump_controller.off,
+            relay_apply_fn=lambda name, state: relay_controller.apply(name, state),
         )
 
     # Optical-density sources available (from config.py via what actually initialized).
@@ -374,19 +383,54 @@ async def lifespan(app: FastAPI):
             def _pump_stop(name):
                 sim_state['pump_velocities'][name] = 0.0
         else:
+            import time as _pt
             from bioreactor_v3.src.io import change_pump as _change_pump, stop_pump as _stop_pump
+            _pump_on_since = {}
             def _pump_run(name, rate):
                 with HARDWARE_LOCK:
                     _change_pump(bioreactor, name, rate)
+                if rate and rate > 0:
+                    _pump_on_since[name] = _pt.time()
             def _pump_stop(name):
                 with HARDWARE_LOCK:
                     _stop_pump(bioreactor, name)
+                # accumulate cumulative ON-time so the run CSV's pump_<name>_time_s tracks usage
+                t0 = _pump_on_since.pop(name, None)
+                if t0 is not None and hasattr(bioreactor, 'pump_run_times'):
+                    bioreactor.pump_run_times[name] = bioreactor.pump_run_times.get(name, 0.0) + (_pt.time() - t0)
         pump_controller.configure(
             run_fn=_pump_run, stop_fn=_pump_stop,
             rate_ml_per_sec=getattr(config, 'PUMP_RUN_ML_PER_SEC', 1.0),
             inflow_ratio=getattr(config, 'PUMP_INFLOW_TIME_RATIO', 0.95),
         )
         pump_controller.start()
+
+    # Relay controller: open/closed/toggle by name + timed command-wait-toggle. The
+    # RelayDriver (real) / sim_state (sim) stores each relay's energized state.
+    if initialized_components.get('relays'):
+        _relay_names = list(getattr(config, 'RELAYS', {}).keys())
+        for _n in _relay_names:
+            sim_state['relays'].setdefault(_n, False)
+        if simulation_mode:
+            def _relay_set(name, energized):
+                sim_state['relays'][name] = bool(energized)
+            def _relay_get():
+                return dict(sim_state['relays'])
+        else:
+            from bioreactor_v3.src.io import relay_on, relay_off, get_all_relay_states
+            def _relay_set(name, energized):
+                with HARDWARE_LOCK:
+                    (relay_on if energized else relay_off)(bioreactor, name)
+            def _relay_get():
+                with HARDWARE_LOCK:
+                    return get_all_relay_states(bioreactor)
+        relay_controller.configure(set_fn=_relay_set, get_fn=_relay_get, names=_relay_names)
+        # Add relay columns to the run CSV: measure_and_record_sensors already writes
+        # each relay's state into the row, but only if the name is in bioreactor.fieldnames.
+        if not simulation_mode and bioreactor is not None and hasattr(bioreactor, 'fieldnames'):
+            for _n in _relay_names:
+                if _n not in bioreactor.fieldnames:
+                    bioreactor.fieldnames.append(_n)
 
     # Rolling sensor-history buffer (samples continuously, independent of runs).
     if getattr(config, 'HISTORY_ENABLED', True):
@@ -405,6 +449,7 @@ async def lifespan(app: FastAPI):
     gas_sampler.stop()
     od_sampler.stop()
     pump_controller.stop()
+    relay_controller.stop()
     history.stop()
     heater.stop()
     if bioreactor:
@@ -529,6 +574,7 @@ async def state(request: Request):
         "ring": {**ring_color, "active": any(ring_color.values())} if initialized_components.get('ring_light') else None,
         "stirrer": _stirrer_state(),
         "pumps": pump_controller.status() if initialized_components.get('pumps') else None,
+        "relays": relay_controller.status() if initialized_components.get('relays') else None,
     }
 
 
@@ -763,27 +809,38 @@ async def pumps_stop(request: Request):
 @app.post("/api/relays/control", response_model=RelayState)
 @limiter.limit(RATE_LIMIT)
 async def relays_control(request: Request, req: RelayControlRequest):
+    """Set a relay: command is open | closed | toggle."""
     require_component('relays')
-    if simulation_mode:
-        sim_state['relays'][req.relay_name] = req.state
-        return RelayState(status="success", states=sim_state['relays'])
-    from bioreactor_v3.src.io import relay_on, relay_off
-    if req.state:
-        relay_on(bioreactor, req.relay_name)
-    else:
-        relay_off(bioreactor, req.relay_name)
-    from bioreactor_v3.src.io import get_all_relay_states
-    return RelayState(status="success", states=get_all_relay_states(bioreactor))
+    try:
+        relay_controller.apply(req.relay_name, req.command)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"no relay named '{req.relay_name}'")
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    heater.note_override(f"relay:{req.relay_name}")
+    return RelayState(status="success", **relay_controller.status())
+
+
+@app.post("/api/relays/timed", response_model=RelayState)
+@limiter.limit(RATE_LIMIT)
+async def relays_timed(request: Request, req: RelayTimedRequest):
+    """command-wait-toggle: run `command` now, then toggle the relay after `duration` s."""
+    require_component('relays')
+    try:
+        relay_controller.timed(req.relay_name, req.command, req.duration)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"no relay named '{req.relay_name}'")
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    heater.note_override(f"relay:{req.relay_name}")
+    return RelayState(status="success", **relay_controller.status())
 
 
 @app.get("/api/relays/state", response_model=RelayState)
 @limiter.limit(RATE_LIMIT)
 async def relays_state(request: Request):
     require_component('relays')
-    if simulation_mode:
-        return RelayState(status="success", states=sim_state['relays'])
-    from bioreactor_v3.src.io import get_all_relay_states
-    return RelayState(status="success", states=get_all_relay_states(bioreactor))
+    return RelayState(status="success", **relay_controller.status())
 
 
 # ---------------------------------------------------------------------------
@@ -1190,13 +1247,22 @@ def _actuator_signals():
     history sampler. All come from shadows or the control lock, so this MUST be called
     OUTSIDE HARDWARE_LOCK to avoid lock-order inversion with the control thread."""
     stir = _stirrer_state()
-    return {
+    sig = {
         "ring": ([ring_color['red'], ring_color['green'], ring_color['blue']]
                  if initialized_components.get('ring_light') else None),
         "stirrer": stir['duty'] if stir else None,
         "ir_power": od_sampler.led_power if initialized_components.get('led') else None,
         "setpoint": heater.status().get('setpoint'),   # None unless a PID/program targets a temp
+        "pump_duty": None,
+        "relays": None,
     }
+    if initialized_components.get('pumps'):
+        ps = pump_controller.status()
+        sig["pump_duty"] = ps['duty'] if ps['active'] else 0.0   # 0-100%, 0 when idle
+    if initialized_components.get('relays'):
+        sig["relays"] = {n: (1 if s == 'closed' else 0)
+                         for n, s in relay_controller.states().items()}
+    return sig
 
 
 def _read_signals():
