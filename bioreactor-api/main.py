@@ -29,6 +29,7 @@ from program import parse_program, ProgramError, expand_tracks
 from history import history
 from od_sampler import od_sampler
 from gas_sampler import gas_sampler
+from pump_controller import pump_controller
 
 # Rolling sensor-history: legacy single-file buffer (migrated once on first boot of
 # the daily-archive version) + the daily-archive directory (history/YYYY-MM-DD.jsonl).
@@ -124,6 +125,11 @@ class PumpState(BaseModel):
     velocity: float
     active: bool
 
+class PumpRunRequest(BaseModel):
+    duration: float = Field(gt=0, description="Cycle interval in seconds")
+    duty_cycle: float = Field(ge=0, le=100, description="Duty cycle 0-100% (fraction of the interval to pump)")
+    flow_rate: Optional[float] = Field(default=None, ge=0, description="Flow rate ml/s while pumping; omit to keep the current/default")
+
 # -- Relays
 class RelayControlRequest(BaseModel):
     relay_name: str = Field(description="Relay identifier")
@@ -187,6 +193,7 @@ sim_state = {
     'stirrer_duty': 0.0,
     'ring_r': 0, 'ring_g': 0, 'ring_b': 0,
     'pump_name': '', 'pump_velocity': 0.0,
+    'pump_velocities': {'inflow': 0.0, 'outflow': 0.0},
     'relays': {},
 }
 
@@ -243,6 +250,8 @@ async def lifespan(app: FastAPI):
                 gas_latest_fn=lambda: gas_sampler.latest(),     # cached CO2/O2 for run-CSV
                 ring_apply_fn=_program_apply_ring,              # program ring cmd -> strip + shadow
                 stirrer_apply_fn=_program_apply_stirrer,        # program stirrer cmd
+                pump_apply_fn=lambda interval, duty, rate=None: pump_controller.set_regime(interval, duty, rate),
+                pump_stop_fn=pump_controller.off,
             )
             heater.prune()  # trim old run files on startup
         except Exception as e:
@@ -263,6 +272,8 @@ async def lifespan(app: FastAPI):
             bio=None, sim=True, sim_state=sim_state, io_module=None,
             pid_func=None, measure_func=None, data_dir=str(DATA_DIR),
             max_heat=70.0, max_cool=100.0,
+            pump_apply_fn=lambda interval, duty, rate=None: pump_controller.set_regime(interval, duty, rate),
+            pump_stop_fn=pump_controller.off,
         )
 
     # Optical-density sources available (from config.py via what actually initialized).
@@ -352,6 +363,29 @@ async def lifespan(app: FastAPI):
         gas_sampler.start()
         logger.info("Gas sensors available: %s", [s['name'] for s in gas_sensors])
 
+    # Timed-dose pump controller: cycles inflow/outflow on a background thread from
+    # a (interval, duty) regime set by POST /api/pumps/run or program 'pump' tracks.
+    if initialized_components.get('pumps'):
+        if simulation_mode:
+            def _pump_run(name, rate):
+                sim_state['pump_velocities'][name] = rate
+            def _pump_stop(name):
+                sim_state['pump_velocities'][name] = 0.0
+        else:
+            from bioreactor_v3.src.io import change_pump as _change_pump, stop_pump as _stop_pump
+            def _pump_run(name, rate):
+                with HARDWARE_LOCK:
+                    _change_pump(bioreactor, name, rate)
+            def _pump_stop(name):
+                with HARDWARE_LOCK:
+                    _stop_pump(bioreactor, name)
+        pump_controller.configure(
+            run_fn=_pump_run, stop_fn=_pump_stop,
+            rate_ml_per_sec=getattr(config, 'PUMP_RUN_ML_PER_SEC', 1.0),
+            inflow_ratio=getattr(config, 'PUMP_INFLOW_TIME_RATIO', 0.95),
+        )
+        pump_controller.start()
+
     # Rolling sensor-history buffer (samples continuously, independent of runs).
     if getattr(config, 'HISTORY_ENABLED', True):
         history.configure(
@@ -368,6 +402,7 @@ async def lifespan(app: FastAPI):
 
     gas_sampler.stop()
     od_sampler.stop()
+    pump_controller.stop()
     history.stop()
     heater.stop()
     if bioreactor:
@@ -491,6 +526,7 @@ async def state(request: Request):
         "led": {"power": led_power, "active": led_power > 0} if initialized_components.get('led') else None,
         "ring": {**ring_color, "active": any(ring_color.values())} if initialized_components.get('ring_light') else None,
         "stirrer": _stirrer_state(),
+        "pumps": pump_controller.status() if initialized_components.get('pumps') else None,
     }
 
 
@@ -683,6 +719,28 @@ async def pumps_state(request: Request):
     if simulation_mode:
         return PumpState(status="success", pump_name=sim_state['pump_name'], velocity=sim_state['pump_velocity'], active=sim_state['pump_velocity'] != 0)
     return PumpState(status="success", pump_name="all", velocity=0.0, active=bool(getattr(bioreactor, 'pumps', None)))
+
+
+@app.post("/api/pumps/run")
+@limiter.limit(RATE_LIMIT)
+async def pumps_run(request: Request, req: PumpRunRequest):
+    """Start (or update) continuous media-exchange dosing: every `duration` seconds,
+    run outflow for duration*duty and inflow for 0.95*duration*duty (duty 0-100%).
+    duty 0 stops it. Cycles until POST /api/pumps/stop or a new regime."""
+    require_component('pumps')
+    pump_controller.set_regime(req.duration, req.duty_cycle, req.flow_rate)
+    heater.note_override('pump')   # a program's pump track yields to this until its next step
+    return {"status": "success", **pump_controller.status()}
+
+
+@app.post("/api/pumps/stop")
+@limiter.limit(RATE_LIMIT)
+async def pumps_stop(request: Request):
+    """Stop pump dosing (both pumps off)."""
+    require_component('pumps')
+    pump_controller.off()
+    heater.note_override('pump')
+    return {"status": "success", **pump_controller.status()}
 
 
 # ---------------------------------------------------------------------------

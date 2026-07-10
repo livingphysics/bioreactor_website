@@ -21,6 +21,7 @@ Commands (one per step; the key names the device):
     temp: <°C>        -> PID setpoint         (device 'peltier', closed loop)
     heater: <±%>      -> open-loop duty       (device 'peltier', +heat / -cool)
     stirrer: <%>      -> stirrer duty         (device 'stirrer')
+    pump: {duty:<%>, interval:<dur>} -> timed media-exchange dosing (device 'pump')
 
 Durations: bare number = seconds; suffix s/m/h/d ("90", "10m", "12h", "10d").
 Omitting "for" (or <=0) on the LAST step of a non-repeating track = hold until the
@@ -46,6 +47,7 @@ _COMMAND_DEVICE = {
     'temp': 'peltier',
     'heater': 'peltier',
     'stirrer': 'stirrer',
+    'pump': 'pump',
 }
 _COMMANDS = tuple(_COMMAND_DEVICE)
 
@@ -151,11 +153,37 @@ def _parse_command(obj: dict, limits: dict):
                 f"heater {val:g}% exceeds {lim:g}% limit ({'heat' if val >= 0 else 'cool'})")
         return device, cmd, val
 
-    # stirrer
-    val = _num(raw, 'stirrer')
-    if not (0.0 <= val <= 100.0):
-        raise ProgramError(f"stirrer {val:g} out of range [0, 100]%")
-    return device, cmd, val
+    if cmd == 'stirrer':
+        val = _num(raw, 'stirrer')
+        if not (0.0 <= val <= 100.0):
+            raise ProgramError(f"stirrer {val:g} out of range [0, 100]%")
+        return device, cmd, val
+
+    # pump: {"duty": 0-100, "interval": <duration>, "rate"?: <ml/s>}  (or [duty,
+    # interval] / [duty, interval, rate]). Cycles every `interval`: outflow on for
+    # interval*duty, inflow for 0.95*interval*duty. `rate` is optional (default flow).
+    rate_raw = None
+    if isinstance(raw, dict):
+        duty_raw, interval_raw, rate_raw = raw.get('duty'), raw.get('interval'), raw.get('rate')
+    elif isinstance(raw, (list, tuple)) and len(raw) in (2, 3):
+        duty_raw, interval_raw = raw[0], raw[1]
+        rate_raw = raw[2] if len(raw) == 3 else None
+    else:
+        raise ProgramError('pump needs {"duty": 0-100, "interval": <seconds>, "rate"?: <ml/s>}'
+                           ' or [duty, interval] / [duty, interval, rate]')
+    duty = _num(duty_raw, 'pump duty')
+    if not (0.0 <= duty <= 100.0):
+        raise ProgramError(f"pump duty {duty:g} out of range [0, 100]%")
+    interval = parse_duration(interval_raw)
+    if interval is None:
+        raise ProgramError(f"pump interval must be a positive duration, got {interval_raw!r}")
+    value = {'duty': duty, 'interval': interval}
+    if rate_raw is not None:
+        rate = _num(rate_raw, 'pump rate')
+        if rate < 0:
+            raise ProgramError(f"pump rate {rate:g} must be >= 0 ml/s")
+        value['rate'] = rate
+    return device, cmd, value
 
 
 def _parse_track(obj: dict, limits: dict, index: int) -> Track:
