@@ -23,6 +23,7 @@ Commands (one per step; the key names the device):
     stirrer: <%>      -> stirrer duty         (device 'stirrer')
     pump: {duty:<%>, interval:<dur>} -> timed media-exchange dosing (device 'pump')
     relay: {name:<relay>, state:open|closed} -> relay state (device 'relay:<name>')
+    od: {power:<%>, enabled?:bool} -> OD IR-LED sampling power/enable (device 'od')
 
 Durations: bare number = seconds; suffix s/m/h/d ("90", "10m", "12h", "10d").
 Omitting "for" (or <=0) on the LAST step of a non-repeating track = hold until the
@@ -50,6 +51,7 @@ _COMMAND_DEVICE = {
     'stirrer': 'stirrer',
     'pump': 'pump',
     'relay': 'relay',   # per-relay device is 'relay:<name>' (resolved in _parse_command)
+    'od': 'od',
 }
 _COMMANDS = tuple(_COMMAND_DEVICE)
 
@@ -188,21 +190,38 @@ def _parse_command(obj: dict, limits: dict):
             value['rate'] = rate
         return device, cmd, value
 
-    # relay: {"name": <relay>, "state": "open"|"closed"}  (or [name, state]). One
-    # relay per track; device is 'relay:<name>' so manual overrides track per relay.
-    rr = obj['relay']
-    if isinstance(rr, dict):
-        rname, rstate = rr.get('name'), rr.get('state')
-    elif isinstance(rr, (list, tuple)) and len(rr) == 2:
-        rname, rstate = rr
+    if cmd == 'relay':
+        # {"name": <relay>, "state": "open"|"closed"} (or [name, state]). One relay per
+        # track; device is 'relay:<name>' so manual overrides track per relay.
+        rr = obj['relay']
+        if isinstance(rr, dict):
+            rname, rstate = rr.get('name'), rr.get('state')
+        elif isinstance(rr, (list, tuple)) and len(rr) == 2:
+            rname, rstate = rr
+        else:
+            raise ProgramError('relay needs {"name": <relay>, "state": "open"|"closed"} or [name, state]')
+        if not isinstance(rname, str) or not rname:
+            raise ProgramError(f"relay name must be a non-empty string, got {rname!r}")
+        rstate = str(rstate).lower()
+        if rstate not in ('open', 'closed'):
+            raise ProgramError(f"relay state must be 'open' or 'closed', got {rstate!r}")
+        return f'relay:{rname}', cmd, {'name': rname, 'state': rstate}
+
+    # od: {"power": 0-100, "enabled"?: bool}  (or a bare number = power). Sets the OD
+    # IR-LED sampling power / enabled; device 'od'. Re-assert it on a schedule to reclaim
+    # manual OD-tab changes at each step boundary.
+    raw_od = obj['od']
+    if isinstance(raw_od, dict):
+        power_raw, enabled_raw = raw_od.get('power'), raw_od.get('enabled')
     else:
-        raise ProgramError('relay needs {"name": <relay>, "state": "open"|"closed"} or [name, state]')
-    if not isinstance(rname, str) or not rname:
-        raise ProgramError(f"relay name must be a non-empty string, got {rname!r}")
-    rstate = str(rstate).lower()
-    if rstate not in ('open', 'closed'):
-        raise ProgramError(f"relay state must be 'open' or 'closed', got {rstate!r}")
-    return f'relay:{rname}', cmd, {'name': rname, 'state': rstate}
+        power_raw, enabled_raw = raw_od, None
+    power = _num(power_raw, 'od power')
+    if not (0.0 <= power <= 100.0):
+        raise ProgramError(f"od power {power:g} out of range [0, 100]%")
+    val = {'power': power}
+    if enabled_raw is not None:
+        val['enabled'] = bool(enabled_raw)
+    return device, cmd, val
 
 
 def _parse_track(obj: dict, limits: dict, index: int) -> Track:

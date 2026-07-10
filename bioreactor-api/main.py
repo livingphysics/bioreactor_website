@@ -263,6 +263,7 @@ async def lifespan(app: FastAPI):
                 pump_apply_fn=lambda interval, duty, rate=None: pump_controller.set_regime(interval, duty, rate),
                 pump_stop_fn=pump_controller.off,
                 relay_apply_fn=_program_apply_relay,
+                od_apply_fn=lambda power, enabled: od_sampler.set_config(led_power=power, enabled=enabled),
             )
             heater.prune()  # trim old run files on startup
         except Exception as e:
@@ -286,6 +287,7 @@ async def lifespan(app: FastAPI):
             pump_apply_fn=lambda interval, duty, rate=None: pump_controller.set_regime(interval, duty, rate),
             pump_stop_fn=pump_controller.off,
             relay_apply_fn=_program_apply_relay,
+            od_apply_fn=lambda power, enabled: od_sampler.set_config(led_power=power, enabled=enabled),
         )
 
     # Optical-density sources available (from config.py via what actually initialized).
@@ -1064,7 +1066,7 @@ async def heater_program(request: Request):
             s.command == 'temp' for tr in prog.tracks for s in tr.steps):
         require_component('temp_sensor')
     try:
-        heater.start_program(prog, gains=getattr(prog, 'gains', None))
+        heater.start_program(prog, gains=getattr(prog, 'gains', None), raw_json=raw.decode('utf-8'))
     except InsufficientStorageError as e:
         raise HTTPException(status_code=507, detail=str(e))
     except RuntimeError as e:
@@ -1164,6 +1166,7 @@ async def set_od_sampling(request: Request, req: ODSamplingRequest):
     if req.enabled is None and req.led_power is None:
         raise HTTPException(status_code=400, detail="provide 'enabled' and/or 'led_power'")
     cfg = od_sampler.set_config(enabled=req.enabled, led_power=req.led_power)
+    heater.note_override('od')   # a program's od track yields to this until its next step
     return {"status": "success", "od_sampling": cfg}
 
 

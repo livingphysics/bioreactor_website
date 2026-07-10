@@ -89,6 +89,11 @@ def prune_run_files(data_dir, max_total_mb, keep):
         try:
             os.remove(p)
             removed.append(p)
+            # also remove the program-JSON saved beside a _program.csv, if present
+            if p.endswith('_program.csv'):
+                sib = p[:-4] + '.json'
+                if os.path.isfile(sib):
+                    os.remove(sib)
         except OSError as e:
             logger.warning("could not prune %s: %s", p, e)
     return removed
@@ -181,6 +186,7 @@ class HeaterController:
         self._pump_apply_fn = None       # callable(interval_s, duty) -> set pump dosing regime
         self._pump_stop_fn = None        # callable() -> stop pump dosing
         self._relay_apply_fn = None      # callable(name, 'open'|'closed') -> set a relay
+        self._od_apply_fn = None         # callable(power, enabled) -> set OD sampler config
 
         self._reset_state()
 
@@ -190,7 +196,8 @@ class HeaterController:
                   retention_max_mb=1000, retention_keep=10, min_free_mb=500,
                   od_power_fn=None, od_latest_fn=None, gas_latest_fn=None,
                   ring_apply_fn=None, stirrer_apply_fn=None,
-                  pump_apply_fn=None, pump_stop_fn=None, relay_apply_fn=None):
+                  pump_apply_fn=None, pump_stop_fn=None, relay_apply_fn=None,
+                  od_apply_fn=None):
         with self._lock:
             self._bio = bio
             self._sim = sim
@@ -212,6 +219,7 @@ class HeaterController:
             self._pump_apply_fn = pump_apply_fn
             self._pump_stop_fn = pump_stop_fn
             self._relay_apply_fn = relay_apply_fn
+            self._od_apply_fn = od_apply_fn
 
     def prune(self):
         """Prune old run files now (e.g. on startup). No-op in simulation."""
@@ -276,6 +284,7 @@ class HeaterController:
         self.last: Dict[str, Any] = {}
         # multi-track program state
         self.program = None                        # program.Program | None
+        self._program_json = None                  # raw program JSON (saved beside the run CSV)
         self.program_end: Optional[float] = None   # run_t0 + duration (None = until tracks done)
         self._track_state: List[Dict[str, Any]] = []  # per-track {idx, seg_end, state, step}
         self._overrides: set = set()               # devices manually overridden this segment
@@ -316,9 +325,10 @@ class HeaterController:
                             delattr(self._bio, attr)
                 self._begin()
 
-    def start_program(self, program, gains: Optional[Dict[str, float]] = None):
+    def start_program(self, program, gains: Optional[Dict[str, float]] = None, raw_json=None):
         """Start a multi-track program (see program.Program). Runs all tracks in
-        parallel; each applies its command once per step boundary."""
+        parallel; each applies its command once per step boundary. `raw_json` (the
+        uploaded program text) is saved beside the run CSV for reproducibility."""
         with self._lifecycle:
             with self._lock:
                 if self.active:
@@ -328,6 +338,7 @@ class HeaterController:
                 self._reset_state()
                 self.mode = 'program'
                 self.program = program
+                self._program_json = raw_json
                 self.gains = {**DEFAULT_GAINS, **(gains or {})}
                 self._track_state = [
                     {'idx': -1, 'seg_end': None, 'state': 'run', 'step': None}
@@ -413,6 +424,13 @@ class HeaterController:
         self._bio.out_file_path = path
         self._bio.writer = writer
         self.data_file = path
+        # Save the program JSON beside the CSV (same basename) so a run is reproducible.
+        if self.mode == 'program' and self._program_json:
+            try:
+                with open(path[:-4] + '.json', 'w') as jf:
+                    jf.write(self._program_json)
+            except Exception as e:
+                logger.warning("could not save program JSON beside CSV: %s", e)
 
     def _close_data_file(self):
         if self._bio is None:
@@ -579,6 +597,10 @@ class HeaterController:
             v = step.value                        # {'name': <relay>, 'state': 'open'|'closed'}
             if self._relay_apply_fn:
                 self._relay_apply_fn(v['name'], v['state'])
+        elif step.command == 'od':
+            v = step.value                        # {'power': 0-100, 'enabled'?: bool}
+            if self._od_apply_fn:
+                self._od_apply_fn(v['power'], v.get('enabled'))
 
     def _end_track_device(self, device: str):
         # A non-repeating track ran out of steps: release the device. The peltier is
