@@ -22,6 +22,7 @@ Commands (one per step; the key names the device):
     heater: <±%>      -> open-loop duty       (device 'peltier', +heat / -cool)
     stirrer: <%>      -> stirrer duty         (device 'stirrer')
     pump: {duty:<%>, interval:<dur>} -> timed media-exchange dosing (device 'pump')
+    relay: {name:<relay>, state:open|closed} -> relay state (device 'relay:<name>')
 
 Durations: bare number = seconds; suffix s/m/h/d ("90", "10m", "12h", "10d").
 Omitting "for" (or <=0) on the LAST step of a non-repeating track = hold until the
@@ -48,6 +49,7 @@ _COMMAND_DEVICE = {
     'heater': 'peltier',
     'stirrer': 'stirrer',
     'pump': 'pump',
+    'relay': 'relay',   # per-relay device is 'relay:<name>' (resolved in _parse_command)
 }
 _COMMANDS = tuple(_COMMAND_DEVICE)
 
@@ -159,31 +161,48 @@ def _parse_command(obj: dict, limits: dict):
             raise ProgramError(f"stirrer {val:g} out of range [0, 100]%")
         return device, cmd, val
 
-    # pump: {"duty": 0-100, "interval": <duration>, "rate"?: <ml/s>}  (or [duty,
-    # interval] / [duty, interval, rate]). Cycles every `interval`: outflow on for
-    # interval*duty, inflow for 0.95*interval*duty. `rate` is optional (default flow).
-    rate_raw = None
-    if isinstance(raw, dict):
-        duty_raw, interval_raw, rate_raw = raw.get('duty'), raw.get('interval'), raw.get('rate')
-    elif isinstance(raw, (list, tuple)) and len(raw) in (2, 3):
-        duty_raw, interval_raw = raw[0], raw[1]
-        rate_raw = raw[2] if len(raw) == 3 else None
+    if cmd == 'pump':
+        # {"duty": 0-100, "interval": <duration>, "rate"?: <ml/s>} (or [duty, interval]
+        # / [duty, interval, rate]). Cycles every `interval`: outflow on for
+        # interval*duty, inflow for 0.95*interval*duty. `rate` is optional.
+        rate_raw = None
+        if isinstance(raw, dict):
+            duty_raw, interval_raw, rate_raw = raw.get('duty'), raw.get('interval'), raw.get('rate')
+        elif isinstance(raw, (list, tuple)) and len(raw) in (2, 3):
+            duty_raw, interval_raw = raw[0], raw[1]
+            rate_raw = raw[2] if len(raw) == 3 else None
+        else:
+            raise ProgramError('pump needs {"duty": 0-100, "interval": <seconds>, "rate"?: <ml/s>}'
+                               ' or [duty, interval] / [duty, interval, rate]')
+        duty = _num(duty_raw, 'pump duty')
+        if not (0.0 <= duty <= 100.0):
+            raise ProgramError(f"pump duty {duty:g} out of range [0, 100]%")
+        interval = parse_duration(interval_raw)
+        if interval is None:
+            raise ProgramError(f"pump interval must be a positive duration, got {interval_raw!r}")
+        value = {'duty': duty, 'interval': interval}
+        if rate_raw is not None:
+            rate = _num(rate_raw, 'pump rate')
+            if rate < 0:
+                raise ProgramError(f"pump rate {rate:g} must be >= 0 ml/s")
+            value['rate'] = rate
+        return device, cmd, value
+
+    # relay: {"name": <relay>, "state": "open"|"closed"}  (or [name, state]). One
+    # relay per track; device is 'relay:<name>' so manual overrides track per relay.
+    rr = obj['relay']
+    if isinstance(rr, dict):
+        rname, rstate = rr.get('name'), rr.get('state')
+    elif isinstance(rr, (list, tuple)) and len(rr) == 2:
+        rname, rstate = rr
     else:
-        raise ProgramError('pump needs {"duty": 0-100, "interval": <seconds>, "rate"?: <ml/s>}'
-                           ' or [duty, interval] / [duty, interval, rate]')
-    duty = _num(duty_raw, 'pump duty')
-    if not (0.0 <= duty <= 100.0):
-        raise ProgramError(f"pump duty {duty:g} out of range [0, 100]%")
-    interval = parse_duration(interval_raw)
-    if interval is None:
-        raise ProgramError(f"pump interval must be a positive duration, got {interval_raw!r}")
-    value = {'duty': duty, 'interval': interval}
-    if rate_raw is not None:
-        rate = _num(rate_raw, 'pump rate')
-        if rate < 0:
-            raise ProgramError(f"pump rate {rate:g} must be >= 0 ml/s")
-        value['rate'] = rate
-    return device, cmd, value
+        raise ProgramError('relay needs {"name": <relay>, "state": "open"|"closed"} or [name, state]')
+    if not isinstance(rname, str) or not rname:
+        raise ProgramError(f"relay name must be a non-empty string, got {rname!r}")
+    rstate = str(rstate).lower()
+    if rstate not in ('open', 'closed'):
+        raise ProgramError(f"relay state must be 'open' or 'closed', got {rstate!r}")
+    return f'relay:{rname}', cmd, {'name': rname, 'state': rstate}
 
 
 def _parse_track(obj: dict, limits: dict, index: int) -> Track:

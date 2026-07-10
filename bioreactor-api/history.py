@@ -127,13 +127,17 @@ class HistoryBuffer:
         # pre-existing archive lines (which lack these keys) stay valid — consumers treat
         # a missing key as null. pduty is signed: + cooling, - heating (like current).
         for key, src, nd in (("pduty", "peltier_duty", 1), ("stir", "stirrer", 1),
-                             ("ir", "ir_power", 1), ("setpoint", "setpoint", 2)):
+                             ("ir", "ir_power", 1), ("setpoint", "setpoint", 2),
+                             ("pump", "pump_duty", 1)):
             v = _num(data.get(src), nd)
             if v is not None:
                 pt[key] = v
         ring = data.get("ring")
         if isinstance(ring, (list, tuple)) and len(ring) == 3:
             pt["ring"] = [int(ring[0]), int(ring[1]), int(ring[2])]
+        relays = data.get("relays")
+        if isinstance(relays, dict) and relays:
+            pt["relays"] = {k: int(v) for k, v in relays.items()}
         od = data.get("od")
         if isinstance(od, dict):
             pt["od"] = {k: _num(v, 5) for k, v in od.items()}   # truncate ADC readings

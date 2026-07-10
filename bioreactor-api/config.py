@@ -39,7 +39,7 @@ class Config:
         'ambient_temp': True,
         'peltier_current': True,
         'pumps': True,
-        'relays': False,
+        'relays': True,
     }
 
     # Peltier Driver (Raspberry Pi 5 GPIO via lgpio)
@@ -189,3 +189,14 @@ class Config:
     # steps_per_ml above); it sets how much volume each ON-second moves.
     PUMP_RUN_ML_PER_SEC: float = 0.0035    # default flow rate; overridable per run
     PUMP_INFLOW_TIME_RATIO: float = 0.95   # inflow runs 0.95x the outflow ON-time
+
+    # Relays (GPIO via lgpio). Named relays -> BCM pins. The API addresses relays by
+    # name; "closed" = energized (driver ON), "open" = de-energized (OFF, the boot
+    # state). RELAY_ACTIVE_LOW handles module polarity (True = pin LOW energizes).
+    RELAYS: dict[str, int] = {
+        'relay_1': 5,
+        'relay_2': 6,
+        'relay_3': 13,
+        'relay_4': 19,
+    }
+    RELAY_ACTIVE_LOW: bool = True
