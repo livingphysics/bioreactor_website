@@ -23,7 +23,7 @@ from slowapi.errors import RateLimitExceeded
 
 import camera
 from auth import verify_token, limiter, RATE_LIMIT
-from control import (heater, parse_schedule, ScheduleError, HARDWARE_LOCK,
+from control import (runner, parse_schedule, ScheduleError, HARDWARE_LOCK,
                      InsufficientStorageError, TEMP_MIN_C, TEMP_MAX_C)
 from program import parse_program, ProgramError, expand_tracks
 from history import history
@@ -185,8 +185,8 @@ class PeltierCurrentState(BaseModel):
     current: Optional[float]
     unit: str = "amps"
 
-# -- Heater PID run
-class HeaterPIDRequest(BaseModel):
+# -- PID run
+class PIDRequest(BaseModel):
     setpoint: float = Field(description="Target bath temperature (°C)")
     kp: float = Field(12.0, description="Proportional gain")
     ki: float = Field(0.015, description="Integral gain")
@@ -232,7 +232,7 @@ async def lifespan(app: FastAPI):
             bioreactor = Bioreactor(config)
             initialized_components = dict(bioreactor._initialized)
             logger.info(f"Hardware initialized: {initialized_components}")
-            # The bioreactor opens a startup data file (header only). The heater
+            # The bioreactor opens a startup data file (header only). The run
             # engine manages its own per-run files, so release + remove the stray
             # startup CSV now (nothing has written to it yet) so it can't linger as
             # the "latest" download.
@@ -246,7 +246,7 @@ async def lifespan(app: FastAPI):
                     os.remove(startup_path)
             except Exception as e:
                 logger.warning(f"Could not release startup data file: {e}")
-            heater.configure(
+            runner.configure(
                 bio=bioreactor, sim=False, sim_state=None, io_module=bio_io,
                 pid_func=temperature_pid_controller, measure_func=measure_and_record_sensors,
                 data_dir=str(DATA_DIR),
@@ -265,7 +265,7 @@ async def lifespan(app: FastAPI):
                 relay_apply_fn=_program_apply_relay,
                 od_apply_fn=lambda power, enabled: od_sampler.set_config(led_power=power, enabled=enabled),
             )
-            heater.prune()  # trim old run files on startup
+            runner.prune()  # trim old run files on startup
         except Exception as e:
             logger.error(f"Hardware init failed: {e}", exc_info=True)
             bioreactor = None
@@ -280,7 +280,7 @@ async def lifespan(app: FastAPI):
                 initialized_components[name] = True
 
     if simulation_mode:
-        heater.configure(
+        runner.configure(
             bio=None, sim=True, sim_state=sim_state, io_module=None,
             pid_func=None, measure_func=None, data_dir=str(DATA_DIR),
             max_heat=70.0, max_cool=100.0,
@@ -458,7 +458,7 @@ async def lifespan(app: FastAPI):
     pump_controller.stop()
     relay_controller.stop()
     history.stop()
-    heater.stop()
+    runner.stop()
     if bioreactor:
         bioreactor.finish()
         logger.info("Hardware cleanup complete")
@@ -512,10 +512,10 @@ async def health(request: Request):
 @app.get("/api/state")
 @limiter.limit(RATE_LIMIT)
 async def state(request: Request):
-    """Aggregate heater-relevant signals in one call (for the live monitor).
+    """Aggregate run-relevant signals in one call (for the live monitor).
 
     Returns bath temp, ambient temp, signed peltier current, peltier duty/direction,
-    and the current heater-run status. Unavailable components report null.
+    and the current run status. Unavailable components report null.
     """
     import time as _time
 
@@ -542,7 +542,7 @@ async def state(request: Request):
         from bioreactor_v3.src.io import (
             get_temperature, read_ambient_temp, read_peltier_current, get_peltier_state,
         )
-        # Serialize bus access against the heater control loop (see control.HARDWARE_LOCK).
+        # Serialize bus access against the run control loop (see control.HARDWARE_LOCK).
         with HARDWARE_LOCK:
             temperature = _sensor('temp_sensor', lambda: get_temperature(bioreactor, sensor_index=0))
             ambient = _sensor('ambient_temp', lambda: read_ambient_temp(bioreactor))
@@ -569,7 +569,7 @@ async def state(request: Request):
         "ambient_temp": ambient,
         "peltier_current": current,
         "peltier": peltier,
-        "heater": heater.status(),
+        "run": runner.status(),
         "co2": _gas.get('co2') if initialized_components.get('co2_sensor') else None,
         "o2": _gas.get('o2') if initialized_components.get('o2_sensor') else None,
         "od": _read_od(),
@@ -651,9 +651,9 @@ async def peltier_control(request: Request, req: PeltierControlRequest):
     require_component('peltier_driver')
     # During a legacy schedule/PID run manual control is blocked; during a program run
     # it's allowed and becomes an override (holds until the peltier track's next step).
-    if heater.active and heater.mode != 'program':
+    if runner.active and runner.mode != 'program':
         raise HTTPException(status_code=409,
-                            detail="a heater run (schedule/PID) is active; stop it before manual control")
+                            detail="a run (schedule/PID) is active; stop it before manual control")
     if simulation_mode:
         sim_state['peltier_duty'] = req.duty_cycle
         sim_state['peltier_direction'] = req.direction
@@ -661,7 +661,7 @@ async def peltier_control(request: Request, req: PeltierControlRequest):
         from bioreactor_v3.src.io import set_peltier_power
         with HARDWARE_LOCK:
             set_peltier_power(bioreactor, req.duty_cycle, req.direction)
-    heater.note_override('peltier')   # no-op unless a program is running
+    runner.note_override('peltier')   # no-op unless a program is running
     return PeltierState(status="success", duty_cycle=req.duty_cycle, direction=req.direction, active=req.duty_cycle > 0)
 
 
@@ -693,7 +693,7 @@ async def stirrer_control(request: Request, req: StirrerControlRequest):
         return StirrerState(status="success", duty_cycle=req.duty_cycle, active=req.duty_cycle > 0)
     from bioreactor_v3.src.io import set_stirrer_speed
     set_stirrer_speed(bioreactor, req.duty_cycle)
-    heater.note_override('stirrer')   # release from the schedule until the next stirrer step
+    runner.note_override('stirrer')   # release from the schedule until the next stirrer step
     return StirrerState(status="success", duty_cycle=req.duty_cycle, active=req.duty_cycle > 0)
 
 
@@ -723,14 +723,14 @@ async def ring_light_control(request: Request, req: RingLightControlRequest):
         sim_state['ring_g'] = req.green
         sim_state['ring_b'] = req.blue
         ring_color = {'red': req.red, 'green': req.green, 'blue': req.blue}
-        heater.note_override('ring')
+        runner.note_override('ring')
         active = any([req.red, req.green, req.blue])
         return RingLightState(status="success", red=req.red, green=req.green, blue=req.blue, active=active)
     from bioreactor_v3.src.io import set_ring_light
     with HARDWARE_LOCK:
         set_ring_light(bioreactor, (req.red, req.green, req.blue), pixel=req.pixel_index)
     ring_color = {'red': req.red, 'green': req.green, 'blue': req.blue}
-    heater.note_override('ring')   # release from the schedule until the next ring step
+    runner.note_override('ring')   # release from the schedule until the next ring step
     active = any([req.red, req.green, req.blue])
     return RingLightState(status="success", red=req.red, green=req.green, blue=req.blue, active=active)
 
@@ -784,7 +784,7 @@ async def pumps_run(request: Request, req: PumpRunRequest):
     duty 0 stops it. Cycles until POST /api/pumps/stop or a new regime."""
     require_component('pumps')
     pump_controller.set_regime(req.duration, req.duty_cycle, req.flow_rate)
-    heater.note_override('pump')   # a program's pump track yields to this until its next step
+    runner.note_override('pump')   # a program's pump track yields to this until its next step
     return {"status": "success", **pump_controller.status()}
 
 
@@ -795,7 +795,7 @@ async def pumps_dose(request: Request, req: PumpRunRequest):
     (duty 0-100%) — then stop. Same body as /run; doesn't repeat."""
     require_component('pumps')
     pump_controller.dose(req.duration, req.duty_cycle, req.flow_rate)
-    heater.note_override('pump')
+    runner.note_override('pump')
     return {"status": "success", **pump_controller.status()}
 
 
@@ -805,7 +805,7 @@ async def pumps_stop(request: Request):
     """Stop pump dosing (both pumps off)."""
     require_component('pumps')
     pump_controller.off()
-    heater.note_override('pump')
+    runner.note_override('pump')
     return {"status": "success", **pump_controller.status()}
 
 
@@ -826,7 +826,7 @@ async def relays_control(request: Request, req: RelayControlRequest):
         raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
-    heater.note_override(f"relay:{req.relay_name}")
+    runner.note_override(f"relay:{req.relay_name}")
     return RelayState(status="success", **relay_controller.status())
 
 
@@ -843,7 +843,7 @@ async def relays_timed(request: Request, req: RelayTimedRequest):
         raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
-    heater.note_override(f"relay:{req.relay_name}")
+    runner.note_override(f"relay:{req.relay_name}")
     return RelayState(status="success", **relay_controller.status())
 
 
@@ -998,12 +998,12 @@ async def peltier_current_state(request: Request):
 
 
 # ---------------------------------------------------------------------------
-# Heater control engine (schedule + PID) — runs on the Pi, next to the hardware
+# Run control engine (schedule + PID) — runs on the Pi, next to the hardware
 # ---------------------------------------------------------------------------
 
-@app.post("/api/heater/schedule")
+@app.post("/api/run/schedule")
 @limiter.limit(RATE_LIMIT)
-async def heater_schedule(request: Request):
+async def run_schedule(request: Request):
     """Upload a peltier schedule CSV (duty,direction,hold_s) and start running it.
 
     Body is the raw CSV text (Content-Type text/plain or text/csv). Same format
@@ -1016,11 +1016,11 @@ async def heater_schedule(request: Request):
     except UnicodeDecodeError:
         raise HTTPException(status_code=400, detail="schedule body must be UTF-8 text")
     try:
-        steps = parse_schedule(text, max_heat=heater.max_heat, max_cool=heater.max_cool)
+        steps = parse_schedule(text, max_heat=runner.max_heat, max_cool=runner.max_cool)
     except ScheduleError as e:
         raise HTTPException(status_code=400, detail=f"invalid schedule: {e}")
     try:
-        heater.start_schedule(steps)
+        runner.start_schedule(steps)
     except InsufficientStorageError as e:
         raise HTTPException(status_code=507, detail=str(e))
     except RuntimeError as e:
@@ -1028,34 +1028,34 @@ async def heater_schedule(request: Request):
     total_hold = round(sum(s['hold_s'] for s in steps), 1)
     return {"status": "success", "mode": "schedule",
             "total_steps": len(steps), "total_duration_s": total_hold,
-            **heater.status()}
+            **runner.status()}
 
 
-@app.post("/api/heater/pid")
+@app.post("/api/run/pid")
 @limiter.limit(RATE_LIMIT)
-async def heater_pid(request: Request, req: HeaterPIDRequest):
+async def run_pid(request: Request, req: PIDRequest):
     """Start a PID run that holds the bath at `setpoint` °C (heater_gui PID mode)."""
     require_component('peltier_driver')
     if not simulation_mode:
         require_component('temp_sensor')
     try:
-        heater.start_pid(req.setpoint, req.kp, req.ki, req.kd)
+        runner.start_pid(req.setpoint, req.kp, req.ki, req.kd)
     except InsufficientStorageError as e:
         raise HTTPException(status_code=507, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
-    return {"status": "success", "mode": "pid", **heater.status()}
+    return {"status": "success", "mode": "pid", **runner.status()}
 
 
-@app.post("/api/heater/program")
+@app.post("/api/run/program")
 @limiter.limit(RATE_LIMIT)
-async def heater_program(request: Request):
+async def run_program(request: Request):
     """Upload + run a multi-device program (JSON). Parallel per-device tracks step
     through their commands; manual dashboard changes override a device until its
     track's next step. Body is the program JSON (see program.py)."""
     require_component('peltier_driver')
     raw = await request.body()
-    limits = {'max_heat': heater.max_heat, 'max_cool': heater.max_cool,
+    limits = {'max_heat': runner.max_heat, 'max_cool': runner.max_cool,
               'temp_min': TEMP_MIN_C, 'temp_max': TEMP_MAX_C}
     try:
         prog = parse_program(raw.decode('utf-8'), limits=limits)
@@ -1066,22 +1066,22 @@ async def heater_program(request: Request):
             s.command == 'temp' for tr in prog.tracks for s in tr.steps):
         require_component('temp_sensor')
     try:
-        heater.start_program(prog, gains=getattr(prog, 'gains', None), raw_json=raw.decode('utf-8'))
+        runner.start_program(prog, gains=getattr(prog, 'gains', None), raw_json=raw.decode('utf-8'))
     except InsufficientStorageError as e:
         raise HTTPException(status_code=507, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
-    return {"status": "success", "mode": "program", **heater.status()}
+    return {"status": "success", "mode": "program", **runner.status()}
 
 
-@app.post("/api/heater/program/preview")
+@app.post("/api/run/program/preview")
 @limiter.limit(RATE_LIMIT)
-async def heater_program_preview(request: Request):
+async def run_program_preview(request: Request):
     """Validate a program and return its per-track segment timeline for a preview.
     Doesn't run anything. Returns {valid:false, error} (200) on a bad program so the
     editor can show it inline."""
     raw = await request.body()
-    limits = {'max_heat': heater.max_heat, 'max_cool': heater.max_cool,
+    limits = {'max_heat': runner.max_heat, 'max_cool': runner.max_cool,
               'temp_min': TEMP_MIN_C, 'temp_max': TEMP_MAX_C}
     try:
         prog = parse_program(raw.decode('utf-8'), limits=limits)
@@ -1091,19 +1091,19 @@ async def heater_program_preview(request: Request):
             **expand_tracks(prog)}
 
 
-@app.post("/api/heater/stop")
+@app.post("/api/run/stop")
 @limiter.limit(RATE_LIMIT)
-async def heater_stop(request: Request):
+async def run_stop(request: Request):
     """Stop any active schedule/PID run and turn the peltier off."""
-    status = heater.stop(reason="stopped via API")
+    status = runner.stop(reason="stopped via API")
     return {"status": "success", **status}
 
 
-@app.get("/api/heater/status")
+@app.get("/api/run/status")
 @limiter.limit(RATE_LIMIT)
-async def heater_status(request: Request):
-    """Current heater-run state (mode, step/progress, last sample, abort reason)."""
-    return heater.status()
+async def run_status(request: Request):
+    """Current run state (mode, step/progress, last sample, abort reason)."""
+    return runner.status()
 
 
 # ---------------------------------------------------------------------------
@@ -1166,7 +1166,7 @@ async def set_od_sampling(request: Request, req: ODSamplingRequest):
     if req.enabled is None and req.led_power is None:
         raise HTTPException(status_code=400, detail="provide 'enabled' and/or 'led_power'")
     cfg = od_sampler.set_config(enabled=req.enabled, led_power=req.led_power)
-    heater.note_override('od')   # a program's od track yields to this until its next step
+    runner.note_override('od')   # a program's od track yields to this until its next step
     return {"status": "success", "od_sampling": cfg}
 
 
@@ -1264,7 +1264,7 @@ def _actuator_signals():
                  if initialized_components.get('ring_light') else None),
         "stirrer": stir['duty'] if stir else None,
         "ir_power": od_sampler.led_power if initialized_components.get('led') else None,
-        "setpoint": heater.status().get('setpoint'),   # None unless a PID/program targets a temp
+        "setpoint": runner.status().get('setpoint'),   # None unless a PID/program targets a temp
         "pump_duty": None,
         "relays": None,
     }
