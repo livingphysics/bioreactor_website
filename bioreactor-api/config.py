@@ -38,7 +38,7 @@ class Config:
         'o2_sensor': True,
         'ambient_temp': True,
         'peltier_current': True,
-        'pumps': False,
+        'pumps': True,
         'relays': False,
     }
 
@@ -167,17 +167,25 @@ class Config:
     # Pumps (ticUSB protocol)
     PUMPS: dict[str, dict[str, Union[str, int, float]]] = {
         'inflow': {
-            'serial': '00473498',
+            'serial': '00473510',
             'step_mode': 3,
             'current_limit': 32,
             'direction': 'forward',
             'steps_per_ml': 10000000.0,
         },
         'outflow': {
-            'serial': '00473497',
+            'serial': '00473504',
             'step_mode': 3,
             'current_limit': 32,
             'direction': 'forward',
             'steps_per_ml': 10000000.0,
         },
     }
+
+    # Timed-dose pump runs (POST /api/pumps/run + program 'pump' tracks).
+    # A "run" cycles every `interval` seconds: outflow ON for interval*duty, inflow
+    # ON for PUMP_INFLOW_TIME_RATIO*interval*duty (duty is 0-1 internally), both at
+    # PUMP_RUN_ML_PER_SEC. CALIBRATE PUMP_RUN_ML_PER_SEC to your pumps (with
+    # steps_per_ml above); it sets how much volume each ON-second moves.
+    PUMP_RUN_ML_PER_SEC: float = 1.0
+    PUMP_INFLOW_TIME_RATIO: float = 0.95   # inflow runs 0.95x the outflow ON-time

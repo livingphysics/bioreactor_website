@@ -178,6 +178,8 @@ class HeaterController:
         self._gas_latest_fn = None       # callable -> cached {'co2','o2'} (from the gas sampler)
         self._ring_apply_fn = None       # callable(color) -> apply program ring command (+ shadow)
         self._stirrer_apply_fn = None    # callable(duty)  -> apply program stirrer command
+        self._pump_apply_fn = None       # callable(interval_s, duty) -> set pump dosing regime
+        self._pump_stop_fn = None        # callable() -> stop pump dosing
 
         self._reset_state()
 
@@ -186,7 +188,8 @@ class HeaterController:
                   data_dir, max_heat, max_cool,
                   retention_max_mb=1000, retention_keep=10, min_free_mb=500,
                   od_power_fn=None, od_latest_fn=None, gas_latest_fn=None,
-                  ring_apply_fn=None, stirrer_apply_fn=None):
+                  ring_apply_fn=None, stirrer_apply_fn=None,
+                  pump_apply_fn=None, pump_stop_fn=None):
         with self._lock:
             self._bio = bio
             self._sim = sim
@@ -205,6 +208,8 @@ class HeaterController:
             self._gas_latest_fn = gas_latest_fn
             self._ring_apply_fn = ring_apply_fn
             self._stirrer_apply_fn = stirrer_apply_fn
+            self._pump_apply_fn = pump_apply_fn
+            self._pump_stop_fn = pump_stop_fn
 
     def prune(self):
         """Prune old run files now (e.g. on startup). No-op in simulation."""
@@ -381,6 +386,11 @@ class HeaterController:
             if thread and thread.is_alive() and threading.current_thread() is not thread:
                 thread.join(timeout=3.0)
             self._all_off()
+            if self.mode == 'program' and self._pump_stop_fn:
+                try:
+                    self._pump_stop_fn()   # a program owns the pumps; stopping it stops dosing
+                except Exception as e:
+                    logger.error("pump stop on run stop failed: %s", e)
             if not self._sim:
                 self._close_data_file()
             if was_active:
@@ -559,13 +569,19 @@ class HeaterController:
             elif self._io is not None:
                 with HARDWARE_LOCK:
                     self._io.set_stirrer_speed(self._bio, duty)
+        elif step.command == 'pump':
+            v = step.value                        # {'duty': 0-100, 'interval': seconds}
+            if self._pump_apply_fn:
+                self._pump_apply_fn(v['interval'], v['duty'])
 
     def _end_track_device(self, device: str):
         # A non-repeating track ran out of steps: release the device. The peltier is
-        # turned OFF for safety; ring/stirrer keep their last value (freely manual now).
+        # turned OFF for safety and pumps stop dosing; ring/stirrer keep their last value.
         if device == 'peltier':
             self.setpoint = None
             self._all_off()
+        elif device == 'pump' and self._pump_stop_fn:
+            self._pump_stop_fn()
 
     def _program_finished(self, now: float) -> bool:
         if self.program_end is not None:
@@ -659,6 +675,11 @@ class HeaterController:
             logger.warning("Heater run aborted: %s", abort)
         self._stop_evt.set()
         self._all_off()
+        if self.mode == 'program' and self._pump_stop_fn:
+            try:
+                self._pump_stop_fn()
+            except Exception as e:
+                logger.error("pump stop on finish failed: %s", e)
         if not self._sim:
             self._close_data_file()
 

@@ -1,3 +1,4 @@
 fastapi
 uvicorn
 slowapi
+ticlib   # Pololu Tic USB stepper controllers (pumps); pulls in pyusb. Needs libusb + udev access.
