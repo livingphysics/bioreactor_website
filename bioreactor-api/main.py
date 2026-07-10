@@ -128,6 +128,7 @@ class PumpState(BaseModel):
 class PumpRunRequest(BaseModel):
     duration: float = Field(gt=0, description="Cycle interval in seconds")
     duty_cycle: float = Field(ge=0, le=100, description="Duty cycle 0-100% (fraction of the interval to pump)")
+    flow_rate: Optional[float] = Field(default=None, ge=0, description="Flow rate ml/s while pumping; omit to keep the current/default")
 
 # -- Relays
 class RelayControlRequest(BaseModel):
@@ -249,7 +250,7 @@ async def lifespan(app: FastAPI):
                 gas_latest_fn=lambda: gas_sampler.latest(),     # cached CO2/O2 for run-CSV
                 ring_apply_fn=_program_apply_ring,              # program ring cmd -> strip + shadow
                 stirrer_apply_fn=_program_apply_stirrer,        # program stirrer cmd
-                pump_apply_fn=lambda interval, duty: pump_controller.set_regime(interval, duty),
+                pump_apply_fn=lambda interval, duty, rate=None: pump_controller.set_regime(interval, duty, rate),
                 pump_stop_fn=pump_controller.off,
             )
             heater.prune()  # trim old run files on startup
@@ -271,7 +272,7 @@ async def lifespan(app: FastAPI):
             bio=None, sim=True, sim_state=sim_state, io_module=None,
             pid_func=None, measure_func=None, data_dir=str(DATA_DIR),
             max_heat=70.0, max_cool=100.0,
-            pump_apply_fn=lambda interval, duty: pump_controller.set_regime(interval, duty),
+            pump_apply_fn=lambda interval, duty, rate=None: pump_controller.set_regime(interval, duty, rate),
             pump_stop_fn=pump_controller.off,
         )
 
@@ -727,7 +728,7 @@ async def pumps_run(request: Request, req: PumpRunRequest):
     run outflow for duration*duty and inflow for 0.95*duration*duty (duty 0-100%).
     duty 0 stops it. Cycles until POST /api/pumps/stop or a new regime."""
     require_component('pumps')
-    pump_controller.set_regime(req.duration, req.duty_cycle)
+    pump_controller.set_regime(req.duration, req.duty_cycle, req.flow_rate)
     heater.note_override('pump')   # a program's pump track yields to this until its next step
     return {"status": "success", **pump_controller.status()}
 

@@ -71,14 +71,17 @@ class PumpController:
         self._stop_both()
 
     # ---------------------------------------------------------------- regime API
-    def set_regime(self, interval_s, duty_pct):
+    def set_regime(self, interval_s, duty_pct, rate_ml_per_sec=None):
         """Start (or update) continuous cycling: dose every `interval_s` seconds at
-        `duty_pct` (0-100). duty 0 or interval <= 0 turns cycling off."""
+        `duty_pct` (0-100). Optionally set the flow rate (ml/s) for this run; None
+        keeps the current rate. duty 0 or interval <= 0 turns cycling off."""
         interval_s = float(interval_s)
         duty = max(0.0, min(float(duty_pct), 100.0)) / 100.0
         with self._lock:
             self._interval_s = interval_s
             self._duty = duty
+            if rate_ml_per_sec is not None:
+                self._rate = max(0.0, float(rate_ml_per_sec))
             self._active = duty > 0.0 and interval_s > 0.0
         self._wake.set()   # apply immediately (interrupt any in-progress sleep)
 
@@ -126,7 +129,7 @@ class PumpController:
         while not self._stop_evt.is_set():
             self._wake.clear()
             with self._lock:
-                active, interval, duty = self._active, self._interval_s, self._duty
+                active, interval, duty, rate = self._active, self._interval_s, self._duty, self._rate
             if not active:
                 self._set_phase('idle')
                 self._stop_both()
@@ -140,8 +143,8 @@ class PumpController:
             # Dose: both pumps ON; inflow stops first, outflow runs a touch longer.
             self._set_phase('dosing')
             try:
-                self._run_fn(self._outflow_name, self._rate)
-                self._run_fn(self._inflow_name, self._rate)
+                self._run_fn(self._outflow_name, rate)
+                self._run_fn(self._inflow_name, rate)
             except Exception as e:
                 logger.error("pump start failed: %s", e)
                 self._stop_both()

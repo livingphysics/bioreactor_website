@@ -159,21 +159,31 @@ def _parse_command(obj: dict, limits: dict):
             raise ProgramError(f"stirrer {val:g} out of range [0, 100]%")
         return device, cmd, val
 
-    # pump: {"duty": 0-100, "interval": <duration>}  (or [duty, interval]). Cycles
-    # every `interval`: outflow on for interval*duty, inflow for 0.95*interval*duty.
+    # pump: {"duty": 0-100, "interval": <duration>, "rate"?: <ml/s>}  (or [duty,
+    # interval] / [duty, interval, rate]). Cycles every `interval`: outflow on for
+    # interval*duty, inflow for 0.95*interval*duty. `rate` is optional (default flow).
+    rate_raw = None
     if isinstance(raw, dict):
-        duty_raw, interval_raw = raw.get('duty'), raw.get('interval')
-    elif isinstance(raw, (list, tuple)) and len(raw) == 2:
-        duty_raw, interval_raw = raw
+        duty_raw, interval_raw, rate_raw = raw.get('duty'), raw.get('interval'), raw.get('rate')
+    elif isinstance(raw, (list, tuple)) and len(raw) in (2, 3):
+        duty_raw, interval_raw = raw[0], raw[1]
+        rate_raw = raw[2] if len(raw) == 3 else None
     else:
-        raise ProgramError('pump needs {"duty": 0-100, "interval": <seconds>} or [duty, interval]')
+        raise ProgramError('pump needs {"duty": 0-100, "interval": <seconds>, "rate"?: <ml/s>}'
+                           ' or [duty, interval] / [duty, interval, rate]')
     duty = _num(duty_raw, 'pump duty')
     if not (0.0 <= duty <= 100.0):
         raise ProgramError(f"pump duty {duty:g} out of range [0, 100]%")
     interval = parse_duration(interval_raw)
     if interval is None:
         raise ProgramError(f"pump interval must be a positive duration, got {interval_raw!r}")
-    return device, cmd, {'duty': duty, 'interval': interval}
+    value = {'duty': duty, 'interval': interval}
+    if rate_raw is not None:
+        rate = _num(rate_raw, 'pump rate')
+        if rate < 0:
+            raise ProgramError(f"pump rate {rate:g} must be >= 0 ml/s")
+        value['rate'] = rate
+    return device, cmd, value
 
 
 def _parse_track(obj: dict, limits: dict, index: int) -> Track:

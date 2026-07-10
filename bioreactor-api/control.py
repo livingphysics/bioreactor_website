@@ -570,9 +570,9 @@ class HeaterController:
                 with HARDWARE_LOCK:
                     self._io.set_stirrer_speed(self._bio, duty)
         elif step.command == 'pump':
-            v = step.value                        # {'duty': 0-100, 'interval': seconds}
+            v = step.value                        # {'duty': 0-100, 'interval': seconds, 'rate'?: ml/s}
             if self._pump_apply_fn:
-                self._pump_apply_fn(v['interval'], v['duty'])
+                self._pump_apply_fn(v['interval'], v['duty'], v.get('rate'))
 
     def _end_track_device(self, device: str):
         # A non-repeating track ran out of steps: release the device. The peltier is

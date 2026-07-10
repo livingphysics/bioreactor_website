@@ -168,17 +168,17 @@ class Config:
     PUMPS: dict[str, dict[str, Union[str, int, float]]] = {
         'inflow': {
             'serial': '00473510',
-            'step_mode': 3,
+            'step_mode': 2,
             'current_limit': 32,
             'direction': 'forward',
-            'steps_per_ml': 10000000.0,
+            'steps_per_ml': 41493129.7,
         },
         'outflow': {
             'serial': '00473504',
-            'step_mode': 3,
+            'step_mode': 2,
             'current_limit': 32,
             'direction': 'forward',
-            'steps_per_ml': 10000000.0,
+            'steps_per_ml': 41493129.7,
         },
     }
 
@@ -187,5 +187,5 @@ class Config:
     # ON for PUMP_INFLOW_TIME_RATIO*interval*duty (duty is 0-1 internally), both at
     # PUMP_RUN_ML_PER_SEC. CALIBRATE PUMP_RUN_ML_PER_SEC to your pumps (with
     # steps_per_ml above); it sets how much volume each ON-second moves.
-    PUMP_RUN_ML_PER_SEC: float = 1.0
+    PUMP_RUN_ML_PER_SEC: float = 0.0035    # default flow rate; overridable per run
     PUMP_INFLOW_TIME_RATIO: float = 0.95   # inflow runs 0.95x the outflow ON-time
