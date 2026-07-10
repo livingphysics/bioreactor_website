@@ -195,21 +195,25 @@ class Config:
     # state). RELAY_ACTIVE_LOW handles module polarity (True = pin LOW energizes).
     RELAYS: dict[str, int] = {
         'CO2': 5,
-        'relay_2': 6,
+        'N2': 6,
         'relay_3': 13,
         'relay_4': 19,
     }
     RELAY_ACTIVE_LOW: bool = True
 
     # Per-relay safety guard. A "dose" = closing (energizing) the relay. A guarded
-    # relay's close auto-reverts to open after max_duration_s, is rate-limited to one
-    # dose per min_interval_s, and is refused if the current CO2 reading is above
-    # co2_max_ppm (or unknown). Enforced in relay_controller.py (Pi), so it applies to
-    # both the manual API and program relay tracks.
+    # relay's close auto-reverts to open after max_duration_s and is rate-limited to one
+    # dose per min_interval_s. If co2_max_ppm is set, a dose is also refused when the
+    # current CO2 reading is above it (or unreadable); omit it for no CO2 gate. Enforced
+    # in relay_controller.py (Pi), so it applies to both the manual API and program tracks.
     RELAY_SAFETY: dict = {
         'CO2': {
             'max_duration_s': 1.0,     # a dose (closed) auto-reverts to open after this
             'min_interval_s': 60.0,    # at most one dose per this window
             'co2_max_ppm': 7500,       # refuse a dose if CO2 is above this (or unreadable)
+        },
+        'N2': {
+            'max_duration_s': 1.0,     # same duration + frequency limits as CO2...
+            'min_interval_s': 60.0,    # ...but no co2_max_ppm -> no CO2-level gate
         },
     }
