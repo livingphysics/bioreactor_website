@@ -39,6 +39,7 @@ class PumpController:
         self._interval_s = 0.0
         self._duty = 0.0                        # 0-1 fraction
         self._active = False
+        self._once = False                      # True = run one dose then stop
         self._phase = 'idle'                    # 'idle' | 'dosing' | 'wait'
 
     # -------------------------------------------------------------- configuration
@@ -82,12 +83,28 @@ class PumpController:
             self._duty = duty
             if rate_ml_per_sec is not None:
                 self._rate = max(0.0, float(rate_ml_per_sec))
+            self._once = False
             self._active = duty > 0.0 and interval_s > 0.0
         self._wake.set()   # apply immediately (interrupt any in-progress sleep)
+
+    def dose(self, interval_s, duty_pct, rate_ml_per_sec=None):
+        """Run a SINGLE dose (outflow interval*duty, inflow 0.95*interval*duty), then
+        stop — not repeating. Same args as set_regime; `interval_s` sets the ON time."""
+        interval_s = float(interval_s)
+        duty = max(0.0, min(float(duty_pct), 100.0)) / 100.0
+        with self._lock:
+            self._interval_s = interval_s
+            self._duty = duty
+            if rate_ml_per_sec is not None:
+                self._rate = max(0.0, float(rate_ml_per_sec))
+            self._once = True
+            self._active = duty > 0.0 and interval_s > 0.0
+        self._wake.set()
 
     def off(self):
         with self._lock:
             self._active = False
+            self._once = False
             self._duty = 0.0
         self._wake.set()
         self._stop_both()
@@ -96,6 +113,7 @@ class PumpController:
         with self._lock:
             return {
                 'active': self._active,
+                'once': self._once,
                 'interval_s': round(self._interval_s, 3),
                 'duty': round(self._duty * 100.0, 1),        # 0-100 %
                 'phase': self._phase if self._active else 'off',
@@ -126,15 +144,20 @@ class PumpController:
         return interrupted or self._stop_evt.is_set()
 
     def _run(self):
+        idled = False   # stop the pumps once on entering idle, not every tick
         while not self._stop_evt.is_set():
             self._wake.clear()
             with self._lock:
-                active, interval, duty, rate = self._active, self._interval_s, self._duty, self._rate
+                active, interval, duty, rate, once = (
+                    self._active, self._interval_s, self._duty, self._rate, self._once)
             if not active:
-                self._set_phase('idle')
-                self._stop_both()
+                if not idled:
+                    self._stop_both()
+                    self._set_phase('idle')
+                    idled = True
                 self._wait(1.0)
                 continue
+            idled = False
 
             on_out = interval * duty
             on_in = self._inflow_ratio * on_out
@@ -158,6 +181,12 @@ class PumpController:
             self._stop_one(self._outflow_name)
             if interrupted:
                 continue   # regime changed/stopped — pumps are off; re-read at top
+
+            if once:                      # single dose done -> go idle (stops at top)
+                with self._lock:
+                    self._active = False
+                    self._once = False
+                continue
 
             # Idle for the remainder of the interval (accounting for call overhead).
             self._set_phase('wait')
