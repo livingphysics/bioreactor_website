@@ -1117,7 +1117,20 @@ async def api_history(request: Request, since: int = 0):
     newer than that timestamp (cheap incremental polling)."""
     return {"status": "success", "interval_s": history.interval_s,
             "od_mode": od_mode, "od_channels": od_channels, "od_available": od_available,
+            "archive_earliest_ms": history.earliest_ms(),
             "points": history.get(since_ms=since)}
+
+
+@app.get("/api/history/range")
+@limiter.limit(RATE_LIMIT)
+async def api_history_range(request: Request, start: int = 0, end: int = 0):
+    """History for an arbitrary [start, end] ms range, read straight from the on-disk
+    daily archive (the rolling /api/history only spans the last ~24h in memory). Backs
+    the 'since program start' plot view; long ranges are downsampled server-side. Same
+    payload shape as /api/history so the frontend can reuse its ingest path."""
+    return {"status": "success", "interval_s": history.interval_s,
+            "od_mode": od_mode, "od_channels": od_channels, "od_available": od_available,
+            "points": history.read_range(start_ms=start, end_ms=(end or None))}
 
 
 class ODModeRequest(BaseModel):
