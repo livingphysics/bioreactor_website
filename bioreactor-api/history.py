@@ -54,6 +54,8 @@ class HistoryBuffer:
         self._last_prune = 0.0
         self._archive_fail = 0        # consecutive archive-append failures
         self._last_fail_log = 0.0     # throttle the failure warning
+        self._earliest_cache = None   # oldest archived timestamp (ms), cached
+        self._earliest_at = 0.0       # when _earliest_cache was computed
 
     @property
     def interval_s(self) -> float:
@@ -194,6 +196,74 @@ class HistoryBuffer:
             if since_ms and since_ms > 0:
                 return [p for p in self._buf if p["t"] > since_ms]
             return list(self._buf)
+
+    def read_range(self, start_ms, end_ms=None, max_points=6000):
+        """Read archived points with start_ms <= t <= end_ms straight from the on-disk
+        daily files. The in-memory buffer only spans window_s (24h), so this backs the
+        'since program start' view, which can reach back further. Points are sorted and,
+        for very long ranges, downsampled by a fixed stride to max_points so the payload
+        and the client redraw stay cheap."""
+        end_ms = int(end_ms) if end_ms else int(time.time() * 1000)
+        start_ms = int(start_ms)
+        if start_ms <= 0 or start_ms >= end_ms or not self._dir:
+            return []
+        out = []
+        day = datetime.fromtimestamp(start_ms / 1000).date()
+        last = datetime.fromtimestamp(end_ms / 1000).date()
+        while day <= last:
+            path = os.path.join(self._dir, day.strftime("%Y-%m-%d") + ".jsonl")
+            if os.path.exists(path):
+                try:
+                    with open(path) as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                p = json.loads(line)
+                            except Exception:
+                                continue
+                            if isinstance(p, dict) and start_ms <= p.get("t", 0) <= end_ms:
+                                out.append(p)
+                except Exception as e:
+                    logger.warning("history read_range %s failed: %s", os.path.basename(path), e)
+            day += timedelta(days=1)
+        out.sort(key=lambda p: p.get("t", 0))
+        if max_points and len(out) > max_points:
+            stride = (len(out) + max_points - 1) // max_points
+            out = out[::stride]
+        return out
+
+    def earliest_ms(self):
+        """Timestamp (ms) of the oldest point in the on-disk archive, or None if empty.
+        Backs the 'max' view when no program is running (full recorded history). Cached
+        for an hour since it only moves as old daily files are pruned."""
+        now = time.time()
+        if self._earliest_cache is not None and (now - self._earliest_at) < 3600:
+            return self._earliest_cache
+        earliest = None
+        if self._dir:
+            for path in sorted(glob.glob(os.path.join(self._dir, "*.jsonl"))):
+                try:
+                    with open(path) as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                p = json.loads(line)
+                            except Exception:
+                                continue
+                            if isinstance(p, dict) and "t" in p:
+                                earliest = int(p["t"])
+                                break
+                except Exception:
+                    continue
+                if earliest is not None:
+                    break
+        self._earliest_cache = earliest
+        self._earliest_at = now
+        return earliest
 
     # ------------------------------------------------------------------ archive I/O
     def _load_recent(self):
