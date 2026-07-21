@@ -18,6 +18,7 @@ developed without a Pi. No data file is written in simulation.
 """
 import os
 import csv
+import math
 import time
 import shutil
 import random
@@ -40,6 +41,22 @@ DEFAULT_GAINS = {'kp': 12.0, 'ki': 0.015, 'kd': 0.0}
 # coordination. Re-entrant so a single tick can nest peltier + sensor calls.
 # main.py acquires this around its hardware reads/writes too.
 HARDWARE_LOCK = threading.RLock()
+
+
+def _json_safe(obj):
+    """Recursively replace non-finite floats (NaN/Inf) with None so a value is safe for
+    Starlette's JSONResponse (it serializes with allow_nan=False and 500s on NaN).
+    self.last defaults absent sensors (e.g. ambient_temp / peltier_current on a rig that
+    lacks them) to float('nan'), so status() would 500 during a run without this.
+    Rebuilds containers, leaving the source (self.last) untouched for the internal
+    NaN-based safety logic."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
 
 
 # --- Data-file retention + disk guard --------------------------------------
@@ -755,7 +772,7 @@ class RunController:
                                              if ts['seg_end'] is not None and self.active else None),
                     })
                 st['tracks'] = tracks
-            return st
+            return _json_safe(st)
 
 
 # Module-level singleton used by main.py
