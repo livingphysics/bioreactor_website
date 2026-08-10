@@ -140,6 +140,14 @@ class HistoryBuffer:
         relays = data.get("relays")
         if isinstance(relays, dict) and relays:
             pt["relays"] = {k: int(v) for k, v in relays.items()}
+        # Cumulative dose counters — capture pump/relay events shorter than the sample
+        # interval (diff successive points for the per-interval amount).
+        relay_closed = data.get("relay_closed_s")
+        if isinstance(relay_closed, dict) and relay_closed:
+            pt["relay_closed_s"] = {k: _num(v, 2) for k, v in relay_closed.items()}
+        pump_time = data.get("pump_time_s")
+        if isinstance(pump_time, dict) and pump_time:
+            pt["pump_time_s"] = {k: _num(v, 2) for k, v in pump_time.items()}
         od = data.get("od")
         if isinstance(od, dict):
             pt["od"] = {k: _num(v, 5) for k, v in od.items()}   # truncate ADC readings

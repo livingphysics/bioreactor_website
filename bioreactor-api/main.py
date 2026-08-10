@@ -421,9 +421,16 @@ async def lifespan(app: FastAPI):
                 return dict(sim_state['relays'])
         else:
             from bioreactor_v3.src.io import relay_on, relay_off, get_all_relay_states
+            if bioreactor is not None and not hasattr(bioreactor, 'relay_closed_times'):
+                bioreactor.relay_closed_times = {n: 0.0 for n in _relay_names}
             def _relay_set(name, energized):
                 with HARDWARE_LOCK:
                     (relay_on if energized else relay_off)(bioreactor, name)
+                # Mirror the controller's cumulative closed-time onto the bioreactor so the
+                # run CSV's relay_<name>_closed_s captures even sub-second doses. The
+                # controller updates its counter before calling this, so it's current here.
+                if bioreactor is not None and hasattr(bioreactor, 'relay_closed_times'):
+                    bioreactor.relay_closed_times.update(relay_controller.closed_seconds())
             def _relay_get():
                 with HARDWARE_LOCK:
                     return get_all_relay_states(bioreactor)
@@ -436,8 +443,9 @@ async def lifespan(app: FastAPI):
         # each relay's state into the row, but only if the name is in bioreactor.fieldnames.
         if not simulation_mode and bioreactor is not None and hasattr(bioreactor, 'fieldnames'):
             for _n in _relay_names:
-                if _n not in bioreactor.fieldnames:
-                    bioreactor.fieldnames.append(_n)
+                for _col in (_n, f"relay_{_n}_closed_s"):   # instantaneous 0/1 + cumulative closed-time
+                    if _col not in bioreactor.fieldnames:
+                        bioreactor.fieldnames.append(_col)
 
     # Rolling sensor-history buffer (samples continuously, independent of runs).
     if getattr(config, 'HISTORY_ENABLED', True):
@@ -1279,14 +1287,22 @@ def _actuator_signals():
         "ir_power": od_sampler.led_power if initialized_components.get('led') else None,
         "setpoint": runner.status().get('setpoint'),   # None unless a PID/program targets a temp
         "pump_duty": None,
+        "pump_time_s": None,
         "relays": None,
+        "relay_closed_s": None,
     }
     if initialized_components.get('pumps'):
         ps = pump_controller.status()
         sig["pump_duty"] = ps['duty'] if ps['active'] else 0.0   # 0-100%, 0 when idle
+        # Cumulative pump ON-time captures brief doses (diff successive samples for the
+        # per-interval amount). None in sim, where there's no bioreactor to track it.
+        if bioreactor is not None and hasattr(bioreactor, 'pump_run_times'):
+            sig["pump_time_s"] = dict(bioreactor.pump_run_times)
     if initialized_components.get('relays'):
         sig["relays"] = {n: (1 if s == 'closed' else 0)
                          for n, s in relay_controller.states().items()}
+        # Cumulative closed-time per relay — captures doses shorter than the sample interval.
+        sig["relay_closed_s"] = relay_controller.closed_seconds()
     return sig
 
 
