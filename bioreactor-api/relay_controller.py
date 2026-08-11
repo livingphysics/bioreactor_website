@@ -36,6 +36,8 @@ class RelayController:
         self._guards = {}          # name -> {max_duration_s, min_interval_s, co2_max_ppm}
         self._co2_fn = None        # () -> current CO2 ppm (or None)
         self._last_dose = {}       # name -> epoch of last dose
+        self._closed_total = {}    # name -> cumulative energized (closed) seconds
+        self._closed_since = {}    # name -> epoch it last closed (if currently closed)
 
     def configure(self, *, set_fn, get_fn, names, guards=None, co2_fn=None):
         self._set_fn = set_fn
@@ -54,6 +56,30 @@ class RelayController:
         if entry:
             entry[0].cancel()
 
+    def _set(self, name, energized):
+        """Drive the relay AND accumulate cumulative closed (energized) time, so brief
+        doses — which can start and end entirely between CSV/history samples — are still
+        captured. Every relay state change routes through here."""
+        now = time.time()
+        since = self._closed_since.get(name)
+        if energized and since is None:
+            self._closed_since[name] = now
+        elif not energized and since is not None:
+            self._closed_total[name] = self._closed_total.get(name, 0.0) + (now - since)
+            self._closed_since[name] = None
+        self._set_fn(name, energized)
+
+    def closed_seconds(self) -> dict:
+        """Cumulative closed (energized) seconds per relay, including any in-progress
+        close. Monotonic per process — diff successive samples for per-interval dose time."""
+        now = time.time()
+        out = {}
+        for name in self._names:
+            total = self._closed_total.get(name, 0.0)
+            since = self._closed_since.get(name)
+            out[name] = round(total + (now - since if since is not None else 0.0), 3)
+        return out
+
     # --------------------------------------------------------------------- API
     def _target(self, name, command) -> bool:
         if command == 'toggle':
@@ -71,7 +97,7 @@ class RelayController:
         if target and name in self._guards:      # closing a guarded relay = a dose
             return self._dose(name)              # manages its own timer; raises (untouched) if blocked
         self._cancel_timer(name)                 # a fresh command wins over a scheduled toggle/dose
-        self._set_fn(name, target)
+        self._set(name, target)
         return 'closed' if target else 'open'
 
     def timed(self, name, command, duration_s) -> str:
@@ -117,7 +143,7 @@ class RelayController:
         dur = maxd if not requested else max(0.05, min(float(requested), maxd))
         self._last_dose[name] = now
         self._cancel_timer(name)
-        self._set_fn(name, True)                      # dose ON (closed)
+        self._set(name, True)                         # dose ON (closed)
         t = threading.Timer(dur, self._end_dose, args=(name,))
         t.daemon = True
         with self._lock:
@@ -130,7 +156,7 @@ class RelayController:
         with self._lock:
             self._timers.pop(name, None)
         try:
-            self._set_fn(name, False)                 # auto-revert to open
+            self._set(name, False)                    # auto-revert to open
         except Exception as e:
             logger.error("%s dose-end failed: %s", name, e)
 
